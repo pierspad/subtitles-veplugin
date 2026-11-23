@@ -409,46 +409,7 @@ class SubtitlesPlugin:
             ]
         )
 
-        # Search Results List
-        if self.search_results:
-            items: list[dict[str, Any]] = []
-            for sub in self.search_results:
-                title_line = f"{sub.movie_name} - {sub.release}" if sub.release else (sub.movie_name or sub.primary_file_name)
-                rating_str = f"{sub.ratings:.1f}" if sub.ratings else "N/A"
-                hi_str = "Yes" if sub.hearing_impaired else "No"
-                sub_line = (
-                    f"Downloads: {sub.download_count:,} • "
-                    f"Rating: {rating_str} • HI: {hi_str} • Release: {sub.release or 'Standard'}"
-                )
-                items.append(
-                    list_item(
-                        id=f"item_{sub.id}",
-                        title=title_line,
-                        subtitle=sub_line,
-                        language=sub.language.lower() if sub.language else None,
-                        badge=sub.badge_text,
-                        actions=[
-                            {"id": f"action_select_{sub.id}", "label": "Select", "variant": "secondary", "tooltip": "Select this subtitle track"},
-                        ],
-                    )
-                )
-
-            children.extend(
-                [
-                    heading(f"Results ({len(self.search_results)})", level=3),
-                    list_widget("search_results_list", items=items),
-                    divider(),
-                ]
-            )
-        elif self.search_query:
-            children.extend(
-                [
-                    text("No subtitles found matching query.", variant="muted"),
-                    divider(),
-                ]
-            )
-
-        # Selected Subtitle & Download Section
+        # Selected Subtitle & Download Section (placed above results for immediate visibility)
         if self.selected_subtitle:
             sub = self.selected_subtitle
             dest_dir = str(self.config_manager.resolve_download_dir())
@@ -514,6 +475,57 @@ class SubtitlesPlugin:
                         gap=2,
                     ),
                     *self._render_cli_revision_section(),
+                    divider(),
+                ]
+            )
+
+        # Search Results List
+        if self.search_results:
+            items: list[dict[str, Any]] = []
+            for sub in self.search_results:
+                is_selected = self.selected_subtitle is not None and self.selected_subtitle.id == sub.id
+                title_line = f"{sub.movie_name} - {sub.release}" if sub.release else (sub.movie_name or sub.primary_file_name)
+                rating_str = f"{sub.ratings:.1f}" if sub.ratings else "N/A"
+                hi_str = "Yes" if sub.hearing_impaired else "No"
+                sub_line = (
+                    f"Downloads: {sub.download_count:,} • "
+                    f"Rating: {rating_str} • HI: {hi_str} • Release: {sub.release or 'Standard'}"
+                )
+                base_badge = sub.badge_text
+                badge_text = f"SELECTED | {base_badge}" if (is_selected and base_badge) else ("SELECTED" if is_selected else base_badge)
+                items.append(
+                    list_item(
+                        id=f"item_{sub.id}",
+                        title=title_line,
+                        subtitle=sub_line,
+                        language=sub.language.lower() if sub.language else None,
+                        badge=badge_text,
+                        actions=[
+                            {
+                                "id": f"action_select_{sub.id}",
+                                "label": "Selected" if is_selected else "Select",
+                                "variant": "success" if is_selected else "primary",
+                                "icon": "check",
+                                "tooltip": "Currently selected subtitle track"
+                                if is_selected
+                                else "Select this subtitle track (or double-click row)",
+                            },
+                        ],
+                    )
+                )
+
+            children.extend(
+                [
+                    heading(f"Results ({len(self.search_results)})", level=3),
+                    list_widget("search_results_list", items=items),
+                    divider(),
+                ]
+            )
+        elif self.search_query:
+            children.extend(
+                [
+                    text("No subtitles found matching query.", variant="muted"),
+                    divider(),
                 ]
             )
 

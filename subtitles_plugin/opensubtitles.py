@@ -13,6 +13,7 @@ Independent client interacting with OpenSubtitles.com REST API v1:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import tempfile
 import urllib.error
@@ -89,6 +90,52 @@ class SubtitleItem:
         if self.hd:
             badges.append("HD")
         return " | ".join(badges)
+
+
+def _normalize_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def _clean_movie_tokens(movie_name: str) -> list[str]:
+    tokens = _normalize_tokens(movie_name)
+    # Strip leading or trailing 4-digit release years (e.g. "1994 - Pulp Fiction" or "Inception (2010)")
+    while len(tokens) > 1 and len(tokens[0]) == 4 and tokens[0].isdigit():
+        tokens = tokens[1:]
+    while len(tokens) > 1 and len(tokens[-1]) == 4 and tokens[-1].isdigit():
+        tokens = tokens[:-1]
+    return tokens
+
+
+def compute_query_relevance(item: SubtitleItem, query: str) -> int:
+    """Computes a title/release relevance tier (0..4) for `item` against `query`.
+
+    - 4: Clean movie title exactly matches the query phrase (e.g. "1994 - Pulp Fiction" for "pulp fiction").
+    - 3: Clean movie title contains the exact query phrase as a contiguous sequence.
+    - 2: All query words appear in the movie title, or the exact query phrase appears in the release name.
+    - 1: All query words appear across the combined movie title + release name.
+    - 0: One or more query words are missing (partial/noise match, e.g. "-FiCTiON" or "From Pulp to Pop").
+    """
+    q_tokens = _normalize_tokens(query)
+    if not q_tokens:
+        return 4
+    q_phrase = " ".join(q_tokens)
+
+    movie_tokens = _clean_movie_tokens(item.movie_name)
+    movie_phrase = " ".join(movie_tokens)
+    release_tokens = _normalize_tokens(item.release or item.primary_file_name)
+    release_phrase = " ".join(release_tokens)
+
+    if movie_phrase == q_phrase:
+        return 4
+    if q_phrase and f" {q_phrase} " in f" {movie_phrase} ":
+        return 3
+    movie_token_set = set(movie_tokens)
+    if all(t in movie_token_set for t in q_tokens) or (q_phrase and f" {q_phrase} " in f" {release_phrase} "):
+        return 2
+    combined_set = movie_token_set | set(release_tokens)
+    if all(t in combined_set for t in q_tokens):
+        return 1
+    return 0
 
 
 def looks_like_tmdb_key_or_token(api_key: str | None) -> str | None:
@@ -308,13 +355,33 @@ class OpenSubtitlesClient:
             )
             parsed.append(subtitle)
 
-        # Prioritize human-authored / trusted subtitles, then ratings and downloads
+        # Filter out partial-word noise when full-query matches exist, and sort by:
+        # 1) Query title relevance (exact title match first)
+        # 2) Human-authored & trusted source
+        # 3) Download count (popularity) and user rating
+        q_clean = (query or "").strip()
+        if q_clean:
+            scored = [(compute_query_relevance(s, q_clean), s) for s in parsed]
+            if any(rel >= 1 for rel, _ in scored):
+                scored = [(rel, s) for rel, s in scored if rel >= 1]
+            scored.sort(
+                key=lambda pair: (
+                    pair[0],
+                    1 if pair[1].is_human_made else 0,
+                    1 if pair[1].from_trusted else 0,
+                    pair[1].download_count,
+                    pair[1].ratings or 0.0,
+                ),
+                reverse=True,
+            )
+            return [s for _, s in scored]
+
         parsed.sort(
             key=lambda s: (
                 1 if s.from_trusted else 0,
                 1 if s.is_human_made else 0,
-                s.ratings or 0.0,
                 s.download_count,
+                s.ratings or 0.0,
             ),
             reverse=True,
         )

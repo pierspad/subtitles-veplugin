@@ -270,6 +270,76 @@ def test_download_rejects_remote_path_and_preserves_existing_file_on_error(tmp_p
     assert list(dest.iterdir()) == [existing]
 
 
+def test_search_relevance_filtering_and_ranking():
+    creds = OpenSubtitlesCredentials(api_key="test_api_key", username=None, password=None, source="test")
+    client = OpenSubtitlesClient(credentials=creds)
+
+    payload = {
+        "data": [
+            {
+                "id": "noise_marvel",
+                "attributes": {
+                    "subtitle_id": "2001",
+                    "language": "it",
+                    "download_count": 193,
+                    "from_trusted": True,
+                    "hd": True,
+                    "release": "Marvel.75.Years.From.Pulp.To.Pop.720p.sub.itasa",
+                    "feature_details": {"movie_name": "2014 - Marvel: 75 Years, From Pulp to Pop!"},
+                    "files": [{"file_id": 1, "file_name": "marvel.srt"}],
+                },
+            },
+            {
+                "id": "noise_pack",
+                "attributes": {
+                    "subtitle_id": "2002",
+                    "language": "it",
+                    "download_count": 134,
+                    "from_trusted": True,
+                    "release": "La.Meute.2011.FRENCH.DVDRiP.XViD-FiCTiON",
+                    "feature_details": {"movie_name": "2010 - The Pack"},
+                    "files": [{"file_id": 2, "file_name": "pack.srt"}],
+                },
+            },
+            {
+                "id": "pulp_low",
+                "attributes": {
+                    "subtitle_id": "2003",
+                    "language": "it",
+                    "download_count": 2836,
+                    "ratings": 10.0,
+                    "from_trusted": False,
+                    "release": "Pulp Fiction (1994) 1080p BluRay Ita Eng x265-NAHOM",
+                    "feature_details": {"movie_name": "1994 - Pulp Fiction"},
+                    "files": [{"file_id": 3, "file_name": "pulp_nahom.srt"}],
+                },
+            },
+            {
+                "id": "pulp_top",
+                "attributes": {
+                    "subtitle_id": "2004",
+                    "language": "it",
+                    "download_count": 22260,
+                    "ratings": 1.3,
+                    "from_trusted": False,
+                    "release": "Pulp Fiction (1994)",
+                    "feature_details": {"movie_name": "1994 - Pulp Fiction"},
+                    "files": [{"file_id": 4, "file_name": "PulpFiction-ITA.srt"}],
+                },
+            },
+        ]
+    }
+    mock_resp = io.BytesIO(json.dumps(payload).encode("utf-8"))
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        results = client.search(query="pulp fiction", languages="it")
+        ids = [r.id for r in results]
+        # Partial-word noise (Marvel "Pulp" without "Fiction", The Pack "-FiCTiON" without "Pulp") is filtered out
+        assert "noise_marvel" not in ids
+        assert "noise_pack" not in ids
+        # Exact title matches are ordered by download count (22,260 before 2,836)
+        assert ids == ["pulp_top", "pulp_low"]
+
+
 class TestOpenSubtitlesSuite(unittest.TestCase):
     def test_all(self):
         test_search_subtitles_filters_machine_and_ai()
@@ -277,6 +347,7 @@ class TestOpenSubtitlesSuite(unittest.TestCase):
         test_user_login()
         test_test_connection_no_key()
         test_test_connection_success()
+        test_search_relevance_filtering_and_ranking()
         with tempfile.TemporaryDirectory() as td:
             test_download_subtitle(Path(td))
         with tempfile.TemporaryDirectory() as td:
