@@ -495,6 +495,104 @@ def test_remove_active_key_clears_form_and_disk(tmp_path: Path):
         assert "not configured" in plugin.status_message
 
 
+def test_vesta_cli_inspect_and_sync_workflow(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    mgr = ConfigManager(repo_root=tmp_path, data_dir=data_dir)
+    client = FakeOpenSubtitlesClient()
+
+    cli_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_requester(method: str, params: dict[str, Any]) -> Any:
+        cli_calls.append((method, params))
+        if method == "vesta.cli" and params.get("command") == "extract":
+            return {
+                "exitCode": 0,
+                "stdout": json.dumps(
+                    {
+                        "cues": [
+                            {"start": "00:00:01,000", "end": "00:00:05,000", "text": "Welcome to the real world."}
+                        ]
+                    }
+                ),
+                "stderr": "",
+                "success": True,
+            }
+        if method == "vesta.cli" and params.get("command") == "sync":
+            args = params.get("args", [])
+            out_idx = args.index("--output") + 1
+            out_file = Path(args[out_idx])
+            out_file.write_text(
+                "1\n00:00:01,500 --> 00:00:05,500\nWelcome to the real world.\n",
+                encoding="utf-8",
+            )
+            return {"exitCode": 0, "stdout": "Synced 1 cues", "stderr": "", "success": True}
+        return {}
+
+    plugin = SubtitlesPlugin(
+        config_manager=mgr,
+        opensubtitles_client=client,
+        requester=fake_requester,
+    )
+    plugin.initialize(api_version=1, data_dir=str(data_dir))
+    plugin.handle_event("search", "btn_do_search", "click", {"search_query": "Matrix"})
+    plugin.handle_event("search", "action_select_sub_test_1", "click", {})
+    plugin.handle_event(
+        "search",
+        "btn_download_now",
+        "click",
+        {"download_dest_dir": str(tmp_path / "subs"), "download_custom_name": "Matrix.srt"},
+    )
+    assert plugin.downloaded_subtitle_path is not None
+
+    # 1. Inspect Cues via vesta.cli
+    inspect_res = plugin.handle_event("search", "btn_cli_inspect", "click", {})
+    assert any(c[0] == "vesta.cli" and c[1]["command"] == "extract" for c in cli_calls)
+    summary_node, _, _ = find_node(inspect_res["root"], "cli_inspection_summary")
+    assert summary_node is not None
+    assert "1 cue(s)" in summary_node["text"]
+    table_node, _, _ = find_node(inspect_res["root"], "cli_cue_preview_table")
+    assert table_node is not None
+    assert table_node["type"] == "table"
+    assert len(table_node["rows"]) == 1
+    assert table_node["rows"][0][2] == "Welcome to the real world."
+
+    # 2. Apply Time Shift (+500ms) via vesta.cli sync
+    sync_res = plugin.handle_event("search", "btn_cli_sync", "click", {"cli_shift_ms": 500})
+    assert any(
+        c[0] == "vesta.cli"
+        and c[1]["command"] == "sync"
+        and "--offset-ms" in c[1]["args"]
+        and "500" in c[1]["args"]
+        for c in cli_calls
+    )
+    assert plugin.downloaded_subtitle_path.endswith("Matrix.shifted_+500ms.srt")
+    summary_after, _, _ = find_node(sync_res["root"], "cli_inspection_summary")
+    assert summary_after is not None
+    assert "Matrix.shifted_+500ms.srt" in summary_after["text"]
+
+
+def test_rpc_send_request_synchronous_response(tmp_path: Path):
+    in_stream = io.StringIO(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1000,
+                "result": {"exitCode": 0, "stdout": "{\"ok\":true}", "stderr": "", "success": True},
+            }
+        )
+        + "\n"
+    )
+    out_stream = io.StringIO()
+    mgr = ConfigManager(repo_root=tmp_path)
+    plugin = SubtitlesPlugin(config_manager=mgr)
+    server = JsonRpcServer(plugin=plugin, input_stream=in_stream, output_stream=out_stream)
+
+    res = plugin.run_cli("extract", ["--input", "/tmp/demo.srt", "--json"])
+    assert res["exitCode"] == 0
+    assert res["success"] is True
+    assert res["json"] == {"ok": True}
+
+
 class TestRpcAndPluginSuite(unittest.TestCase):
     def test_all(self):
         test_schema_single_object_patch()
@@ -506,6 +604,8 @@ class TestRpcAndPluginSuite(unittest.TestCase):
             test_ui_layout_and_expert_widgets,
             test_search_guidance_and_local_key,
             test_remove_active_key_clears_form_and_disk,
+            test_vesta_cli_inspect_and_sync_workflow,
+            test_rpc_send_request_synchronous_response,
         ):
             with tempfile.TemporaryDirectory() as td:
                 fn(Path(td))

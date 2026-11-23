@@ -30,12 +30,14 @@ from subtitles_plugin.schema import (
     list_item,
     list_widget,
     make_patch,
+    number_input,
     password_input,
     path_input,
     progress,
     row,
     segmented,
     select,
+    table,
     text,
     text_input,
 )
@@ -78,6 +80,11 @@ class SubtitlesPlugin:
         self.local_tracks: list[SubtitleTrackInfo] = []
         self.extracted_subtitle_path: str | None = None
         self.last_extraction_result: ExtractionResult | None = None
+
+        # Vesta CLI Subtitle Revision & Retiming State
+        self.cli_inspection_summary: str | None = None
+        self.cli_preview_rows: list[list[str]] = []
+        self.cli_shift_ms: int = 0
 
     @property
     def opensubtitles_client(self) -> OpenSubtitlesClient:
@@ -148,6 +155,40 @@ class SubtitlesPlugin:
             return res if isinstance(res, dict) else {}
         return {}
 
+    def run_cli(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        timeout_secs: int = 120,
+    ) -> dict[str, Any]:
+        """Executes a `vesta-cli` subcommand via the Vesta host `vesta.cli` JSON-RPC bridge.
+
+        Requires `"vesta:cli"` in `vesta-plugin.json` `permissions`.
+        """
+        if not (self.requester and callable(self.requester)):
+            return {}
+        import json as _json
+
+        res = self.requester(
+            "vesta.cli",
+            {
+                "command": str(command),
+                "args": [str(a) for a in (args or [])],
+                "timeoutSecs": int(timeout_secs),
+            },
+        )
+        if not isinstance(res, dict):
+            return {"result": res}
+        stdout = res.get("stdout", "")
+        if isinstance(stdout, str):
+            stripped = stdout.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    res["json"] = _json.loads(stripped)
+                except Exception:
+                    pass
+        return res
+
     # Lifecycle
 
     def initialize(
@@ -210,6 +251,65 @@ class SubtitlesPlugin:
     def _render_status_banner(self) -> dict[str, Any]:
         """Renders status message banner (hidden in favor of Vesta host snackbars)."""
         return text("", id="status_banner", hidden=True)
+
+    def _render_cli_revision_section(self) -> list[dict[str, Any]]:
+        """Renders the declarative 'Subtitle Revision & Retiming (Vesta CLI)' panel."""
+        widgets: list[dict[str, Any]] = [
+            divider(),
+            heading("Subtitle Revision & Retiming (Vesta CLI)", level=3),
+            text(
+                "Inspect subtitle cues or shift timestamps via the native vesta-cli engine before opening in Flashcards.",
+                variant="muted",
+                size="sm",
+            ),
+            row(
+                [
+                    number_input(
+                        "cli_shift_ms",
+                        label="Time Shift (ms)",
+                        defaultValue=self.cli_shift_ms,
+                        step=100,
+                        min_val=-3600000,
+                        max_val=3600000,
+                        tooltip="Shift all subtitle timestamps (+ delays, - advances) via vesta-cli sync",
+                    ),
+                    button(
+                        "btn_cli_inspect",
+                        "Inspect Cues (vesta-cli)",
+                        variant="secondary",
+                        icon="search",
+                        tooltip="Inspect cue count, timing span, and preview rows via vesta.cli",
+                    ),
+                    button(
+                        "btn_cli_sync",
+                        "Apply Time Shift (vesta-cli)",
+                        variant="secondary",
+                        icon="refresh",
+                        tooltip="Shift all subtitle timestamps using vesta-cli sync --offset-ms",
+                    ),
+                ],
+                gap=3,
+                align="end",
+            ),
+        ]
+        if self.cli_inspection_summary:
+            widgets.append(
+                text(
+                    self.cli_inspection_summary,
+                    variant="success",
+                    size="sm",
+                    id="cli_inspection_summary",
+                )
+            )
+        if self.cli_preview_rows:
+            widgets.append(
+                table(
+                    ["#", "Timing", "Subtitle Text"],
+                    self.cli_preview_rows,
+                    id="cli_cue_preview_table",
+                )
+            )
+        return widgets
 
     # Screen: Search
 
@@ -407,6 +507,7 @@ class SubtitlesPlugin:
                         ],
                         gap=2,
                     ),
+                    *self._render_cli_revision_section(),
                 ]
             )
 
@@ -523,6 +624,7 @@ class SubtitlesPlugin:
                         ],
                         gap=2,
                     ),
+                    *self._render_cli_revision_section(),
                 ]
             )
 
@@ -742,6 +844,8 @@ class SubtitlesPlugin:
             "btn_use_in_flashcards_local": self._handle_flashcards_local_event,
             "btn_save_settings": self._handle_save_settings,
             "btn_test_credentials": self._handle_test_credentials,
+            "btn_cli_inspect": self._handle_cli_inspect,
+            "btn_cli_sync": self._handle_cli_sync,
         }
         if handler := actions.get(widget_id):
             return handler(values)
@@ -879,6 +983,8 @@ class SubtitlesPlugin:
         self.report_progress("dl_op", 30.0, f"Downloading {custom_name}...")
         try:
             is_dry = self.config_manager.resolve_dry_run()
+            self.cli_inspection_summary = None
+            self.cli_preview_rows = []
             if is_dry:
                 out_path = Path(dest_dir).resolve() / custom_name
                 self.downloaded_subtitle_path = str(out_path)
@@ -976,6 +1082,8 @@ class SubtitlesPlugin:
 
         if res.success:
             self.extracted_subtitle_path = res.output_path
+            self.cli_inspection_summary = None
+            self.cli_preview_rows = []
             self.status_message = res.message
             self.status_variant = "success"
             self.notify(res.message, level="success")
@@ -1055,3 +1163,143 @@ class SubtitlesPlugin:
         self.notify(msg, level="success" if ok else "error")
 
         return {"root": self.render_screen("settings", values)}
+
+    def _active_subtitle_path(self) -> tuple[str, str]:
+        """Returns `(target_screen, subtitle_path)` for the active screen."""
+        if self.current_screen in ("local", "settings") and self.extracted_subtitle_path:
+            return self.current_screen, self.extracted_subtitle_path
+        if self.downloaded_subtitle_path:
+            return "search", self.downloaded_subtitle_path
+        if self.extracted_subtitle_path:
+            return "local", self.extracted_subtitle_path
+        return "search", ""
+
+    @staticmethod
+    def _parse_srt_cues(content: str) -> list[tuple[str, str, str]]:
+        """Parses raw `.srt` text into a list of `(index, timing, text)` tuples."""
+        cues: list[tuple[str, str, str]] = []
+        blocks = [b.strip() for b in content.replace("\r\n", "\n").split("\n\n") if b.strip()]
+        for block in blocks:
+            lines = [ln.strip() for ln in block.split("\n") if ln.strip()]
+            if len(lines) >= 2 and "-->" in lines[1]:
+                idx = lines[0]
+                timing = lines[1]
+                body = " ".join(lines[2:]) if len(lines) > 2 else ""
+                cues.append((idx, timing, body))
+            elif len(lines) >= 1 and "-->" in lines[0]:
+                timing = lines[0]
+                body = " ".join(lines[1:]) if len(lines) > 1 else ""
+                cues.append((str(len(cues) + 1), timing, body))
+        return cues
+
+    def _handle_cli_inspect(self, values: dict[str, Any]) -> dict[str, Any]:
+        target_screen, sub_path = self._active_subtitle_path()
+        if not sub_path:
+            self.status_message = "No subtitle file available to inspect."
+            self.status_variant = "danger"
+            self.notify(self.status_message, level="warn")
+            return {"root": self.render_screen(target_screen, values)}
+
+        self.report_progress("cli_inspect_op", 25.0, "Inspecting subtitle via vesta-cli...")
+        cli_res = self.run_cli("extract", ["--input", sub_path, "--json"])
+
+        cues: list[tuple[str, str, str]] = []
+        p = Path(sub_path)
+        if p.is_file():
+            try:
+                cues = self._parse_srt_cues(p.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                cues = []
+
+        if not cues and isinstance(cli_res.get("stdout"), str) and "-->" in cli_res["stdout"]:
+            cues = self._parse_srt_cues(cli_res["stdout"])
+
+        cue_count = len(cues)
+        if isinstance(cli_res.get("json"), dict) and "cues" in cli_res["json"]:
+            raw_cues = cli_res["json"]["cues"]
+            if isinstance(raw_cues, list) and not cues:
+                cue_count = len(raw_cues)
+                for idx, item in enumerate(raw_cues[:8], start=1):
+                    if isinstance(item, dict):
+                        start = str(item.get("start", item.get("start_ms", "")))
+                        end = str(item.get("end", item.get("end_ms", "")))
+                        txt = str(item.get("text", ""))
+                        cues.append((str(idx), f"{start} --> {end}", txt))
+
+        self.cli_preview_rows = [[idx, timing, txt] for idx, timing, txt in cues[:8]]
+        span_info = ""
+        if cues:
+            first_start = cues[0][1].split("-->")[0].strip()
+            last_end = cues[-1][1].split("-->")[-1].strip()
+            span_info = f" • {first_start} → {last_end}"
+
+        exit_code = cli_res.get("exitCode", 0) if isinstance(cli_res, dict) else 0
+        self.cli_inspection_summary = (
+            f"Vesta CLI Inspection (exit={exit_code}): {cue_count} cue(s) in {p.name}{span_info}"
+        )
+        self.status_message = self.cli_inspection_summary
+        self.status_variant = "success"
+        self.notify(self.cli_inspection_summary, level="success")
+        self.report_progress("cli_inspect_op", 100.0, "CLI inspection complete")
+        return {"root": self.render_screen(target_screen, values)}
+
+    def _handle_cli_sync(self, values: dict[str, Any]) -> dict[str, Any]:
+        target_screen, sub_path = self._active_subtitle_path()
+        if not sub_path:
+            self.status_message = "No subtitle file available to retime."
+            self.status_variant = "danger"
+            self.notify(self.status_message, level="warn")
+            return {"root": self.render_screen(target_screen, values)}
+
+        raw_shift = values.get("cli_shift_ms", self.cli_shift_ms)
+        try:
+            offset_ms = int(float(raw_shift or 0))
+        except (TypeError, ValueError):
+            offset_ms = 0
+        self.cli_shift_ms = offset_ms
+
+        if offset_ms == 0:
+            self.status_message = "Enter a non-zero time shift in milliseconds (e.g. 500 or -350)."
+            self.status_variant = "danger"
+            self.notify(self.status_message, level="warn")
+            return {"root": self.render_screen(target_screen, values)}
+
+        src = Path(sub_path)
+        sign = f"+{offset_ms}ms" if offset_ms > 0 else f"{offset_ms}ms"
+        stem = src.stem
+        out_path = src.with_name(f"{stem}.shifted_{sign}.srt")
+
+        self.report_progress("cli_sync_op", 30.0, f"Shifting timestamps by {sign} via vesta-cli sync...")
+        cli_res = self.run_cli(
+            "sync",
+            [
+                "--input",
+                str(src),
+                "--output",
+                str(out_path),
+                "--offset-ms",
+                str(offset_ms),
+            ],
+        )
+
+        success = bool(isinstance(cli_res, dict) and cli_res.get("success", True))
+        if not success:
+            stderr = cli_res.get("stderr") if isinstance(cli_res, dict) else "CLI error"
+            self.status_message = f"vesta-cli sync failed: {stderr}"
+            self.status_variant = "danger"
+            self.notify(self.status_message, level="error")
+            return {"root": self.render_screen(target_screen, values)}
+
+        if target_screen == "search" or self.downloaded_subtitle_path == sub_path:
+            self.downloaded_subtitle_path = str(out_path)
+        else:
+            self.extracted_subtitle_path = str(out_path)
+
+        self.cli_inspection_summary = (
+            f"Retimed via vesta-cli sync ({sign}) → {out_path.name}"
+        )
+        self.status_message = self.cli_inspection_summary
+        self.status_variant = "success"
+        self.notify(self.cli_inspection_summary, level="success")
+        self.report_progress("cli_sync_op", 100.0, "Subtitle retimed")
+        return {"root": self.render_screen(target_screen, values)}

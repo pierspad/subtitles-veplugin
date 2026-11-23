@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "subtitles-veplugin"
-version = "1.0.0"
-description = "Vesta plugin for OpenSubtitles search, downloads, and local subtitle extraction"
+version = "1.1.0"
+description = "Vesta plugin for OpenSubtitles search, downloads, local subtitle extraction, and Vesta CLI inspection & retiming"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.9"

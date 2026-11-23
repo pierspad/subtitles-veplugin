@@ -18,6 +18,7 @@ Supported Outbound Notifications (Plugin -> Vesta):
 
 Supported Outbound Requests (Plugin -> Vesta):
 - ui.getValues(screen)
+- vesta.cli(command, args?, timeoutSecs?)
 """
 
 from __future__ import annotations
@@ -51,10 +52,19 @@ class JsonRpcServer:
         self.running: bool = False
         self._next_request_id: int = 1000
         self.pending_responses: dict[Any, Any] = {}
+        self._inbox: list[str] = []
 
         # Wire notifier and requester callbacks into plugin
         self.plugin.notifier = self.send_notification
         self.plugin.requester = self.send_request
+
+    def _read_next_line(self) -> str | None:
+        if self._inbox:
+            return self._inbox.pop(0)
+        line = self.input_stream.readline()
+        if not line:
+            return None
+        return line
 
     def send_response(self, req_id: Any, result: Any) -> None:
         """Send a success response to Vesta."""
@@ -87,7 +97,12 @@ class JsonRpcServer:
         self._write_payload(payload)
 
     def send_request(self, method: str, params: dict[str, Any]) -> Any:
-        """Send a request to Vesta host and record request id."""
+        """Send a request to Vesta host and synchronously wait for its response.
+
+        If the input stream ends before a matching response is received (e.g. in
+        fire-and-forget unit tests with a static StringIO), records and returns
+        `{"id": req_id}`.
+        """
         req_id = self._next_request_id
         self._next_request_id += 1
         payload = {
@@ -97,7 +112,35 @@ class JsonRpcServer:
             "params": params,
         }
         self._write_payload(payload)
-        return {"id": req_id}
+
+        while True:
+            raw_line = self.input_stream.readline()
+            if not raw_line:
+                return {"id": req_id}
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                continue
+            if (
+                isinstance(parsed, dict)
+                and parsed.get("id") == req_id
+                and "method" not in parsed
+            ):
+                if "error" in parsed and parsed["error"]:
+                    err = parsed["error"]
+                    err_msg = (
+                        err.get("message", "RPC error")
+                        if isinstance(err, dict)
+                        else str(err)
+                    )
+                    raise RuntimeError(err_msg)
+                res = parsed.get("result")
+                self.pending_responses[req_id] = res
+                return res
+            self._inbox.append(raw_line)
 
     def _write_payload(self, payload: dict[str, Any]) -> None:
         line = json.dumps(payload, separators=(",", ":"))
@@ -180,7 +223,10 @@ class JsonRpcServer:
     def run(self) -> None:
         """Run the main server loop reading lines from input stream."""
         self.running = True
-        for line in self.input_stream:
+        while True:
+            line = self._read_next_line()
+            if line is None:
+                break
             keep_running = self.process_message(line)
             if not keep_running:
                 break
