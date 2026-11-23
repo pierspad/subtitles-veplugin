@@ -129,9 +129,15 @@ class SubtitlesPlugin:
         self.notifier("ui.update", params)
 
     def notify(self, msg: str, level: str = "info") -> None:
-        """Emits a standard toast 'ui.notify' to Vesta (info, success, warn, error)."""
+        """Emits a standard toast 'ui.notify' to Vesta (info, success, warn, error) and records a support log."""
         if self.notifier and callable(self.notifier):
             self.notifier("ui.notify", {"level": level, "msg": msg})
+        self.log(msg, level=level)
+
+    def log(self, msg: str, level: str = "info") -> None:
+        """Emits a structured 'vesta.log' diagnostic notification captured by Vesta Support Logs."""
+        if self.notifier and callable(self.notifier):
+            self.notifier("vesta.log", {"level": level, "msg": msg})
 
     def report_progress(self, id: str, value: float, label: str = "") -> None:
         """Emits a 'ui.progress' notification to Vesta."""
@@ -934,6 +940,11 @@ class SubtitlesPlugin:
             return {"root": self.render_screen("search", values)}
 
         self.report_progress("search_op", 25.0, "Searching OpenSubtitles...")
+        self.log(
+            f"Searching OpenSubtitles: query='{self.search_query}', tmdb='{self.search_tmdb_id}', "
+            f"imdb='{self.search_imdb_id}', languages='{self.search_languages}'",
+            level="info",
+        )
 
         try:
             results = self.opensubtitles_client.search(
@@ -947,6 +958,7 @@ class SubtitlesPlugin:
             self.selected_subtitle = None
             self.status_message = None
             self.status_variant = "normal"
+            self.log(f"OpenSubtitles search completed: {len(results)} result(s) found", level="info")
             self.report_progress("search_op", 100.0, "Search completed")
         except Exception as e:
             self.search_results = []
@@ -1120,9 +1132,15 @@ class SubtitlesPlugin:
         return {"patch": patch}
 
     def _handle_save_settings(self, values: dict[str, Any]) -> dict[str, Any]:
+        from subtitles_plugin.opensubtitles import looks_like_tmdb_key_or_token
+
         api_key = str(values.get("cfg_api_key") or "").strip()
         if not api_key:
             return {"snackbar": {"message": "Enter an OpenSubtitles Consumer API key.", "type": "warning"}}
+
+        tmdb_warning = looks_like_tmdb_key_or_token(api_key)
+        if tmdb_warning:
+            self.log(f"API key format warning on save: {tmdb_warning}", level="warn")
 
         updates = {
             "opensubtitles_api_key": api_key,
@@ -1138,7 +1156,10 @@ class SubtitlesPlugin:
 
         self.status_message = None
         root = self.render_screen("settings")
-        root["snackbar"] = {"message": "Settings saved successfully.", "type": "success"}
+        if tmdb_warning:
+            root["snackbar"] = {"message": f"Settings saved, but warning: {tmdb_warning}", "type": "warning"}
+        else:
+            root["snackbar"] = {"message": "Settings saved successfully.", "type": "success"}
         return {"root": root}
 
     def _handle_test_credentials(self, values: dict[str, Any]) -> dict[str, Any]:

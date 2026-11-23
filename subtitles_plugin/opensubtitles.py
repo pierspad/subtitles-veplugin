@@ -91,6 +91,26 @@ class SubtitleItem:
         return " | ".join(badges)
 
 
+def looks_like_tmdb_key_or_token(api_key: str | None) -> str | None:
+    """Detects if the user accidentally pasted a TMDB v3 API Key (32-char lowercase hex)
+    or a TMDB v4 Read Access Token (JWT starting with 'eyJ') into the OpenSubtitles API Key field.
+    """
+    if not api_key:
+        return None
+    cleaned = api_key.strip()
+    if cleaned.startswith("eyJ") and cleaned.count(".") >= 2:
+        return (
+            "The configured key looks like a JWT Read Access Token (e.g. from TMDB). "
+            "OpenSubtitles requires a Consumer API Key from https://www.opensubtitles.com/en/consumers."
+        )
+    if len(cleaned) == 32 and all(c in "0123456789abcdef" for c in cleaned):
+        return (
+            "The configured key is a 32-character hexadecimal string (typical of a TMDB v3 API Key). "
+            "OpenSubtitles requires an OpenSubtitles.com Consumer API Key from https://www.opensubtitles.com/en/consumers."
+        )
+    return None
+
+
 class OpenSubtitlesClient:
     """Client for OpenSubtitles.com REST API v1."""
 
@@ -156,6 +176,15 @@ class OpenSubtitlesClient:
                 msg = err_json.get("message") or err_json.get("error") or raw_err
             except Exception:
                 msg = raw_err or str(e)
+            if e.code == 403 and "cannot consume this service" in str(msg).lower():
+                hint = looks_like_tmdb_key_or_token(self.credentials.api_key)
+                if hint:
+                    msg = f"{msg} — {hint}"
+                else:
+                    msg = (
+                        f"{msg} — Verify that your key is an active OpenSubtitles.com Consumer API Key "
+                        "from https://www.opensubtitles.com/en/consumers (not a TMDB API Key or Read Access Token)."
+                    )
             raise RuntimeError(f"OpenSubtitles API error (HTTP {e.code}): {msg}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"OpenSubtitles connection failed: {e.reason}") from e

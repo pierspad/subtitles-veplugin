@@ -593,6 +593,35 @@ def test_rpc_send_request_synchronous_response(tmp_path: Path):
     assert res["json"] == {"ok": True}
 
 
+def test_plugin_emits_vesta_log_and_detects_tmdb_keys(tmp_path: Path):
+    from subtitles_plugin.opensubtitles import looks_like_tmdb_key_or_token
+
+    assert looks_like_tmdb_key_or_token("0123456789abcdef0123456789abcdef") is not None
+    assert looks_like_tmdb_key_or_token("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig") is not None
+    assert looks_like_tmdb_key_or_token("AbCdEfGhIjKlMnOpQrStUvWxYz123456") is None
+
+    notifications: list[tuple[str, dict[str, Any]]] = []
+    mgr = ConfigManager(repo_root=tmp_path, data_dir=tmp_path / "data")
+    plugin = SubtitlesPlugin(
+        config_manager=mgr,
+        opensubtitles_client=FakeOpenSubtitlesClient(),
+        notifier=lambda method, params: notifications.append((method, params)),
+    )
+    plugin.handle_event("search", "btn_do_search", "click", {"search_query": "Matrix"})
+    log_events = [n for n in notifications if n[0] == "vesta.log"]
+    assert len(log_events) >= 2
+    assert any("Searching OpenSubtitles" in e[1]["msg"] for e in log_events)
+
+    save_res = plugin.handle_event(
+        "settings",
+        "btn_save_settings",
+        "click",
+        {"cfg_api_key": "0123456789abcdef0123456789abcdef"},
+    )
+    assert save_res["root"]["snackbar"]["type"] == "warning"
+    assert "TMDB" in save_res["root"]["snackbar"]["message"]
+
+
 class TestRpcAndPluginSuite(unittest.TestCase):
     def test_all(self):
         test_schema_single_object_patch()
@@ -606,6 +635,7 @@ class TestRpcAndPluginSuite(unittest.TestCase):
             test_remove_active_key_clears_form_and_disk,
             test_vesta_cli_inspect_and_sync_workflow,
             test_rpc_send_request_synchronous_response,
+            test_plugin_emits_vesta_log_and_detects_tmdb_keys,
         ):
             with tempfile.TemporaryDirectory() as td:
                 fn(Path(td))
