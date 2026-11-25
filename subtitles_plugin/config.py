@@ -116,9 +116,11 @@ class ConfigManager:
         repo_root: Path | None = None,
         data_dir: Path | None = None,
         settings_file_name: str = "settings.json",
+        downloads_dir: Path | str | None = None,
     ):
         self.repo_root = repo_root or Path(__file__).resolve().parent.parent
         self.data_dir = data_dir
+        self.downloads_dir = self._coerce_optional_path(downloads_dir)
         self.settings_file_name = settings_file_name
         self.settings = PluginSettings()
         self.dotenv_vars: dict[str, str] = {}
@@ -130,10 +132,23 @@ class ConfigManager:
         if self.data_dir:
             self.load_settings()
 
+    @staticmethod
+    def _coerce_optional_path(value: Path | str | None) -> Path | None:
+        if value is None:
+            return None
+        if isinstance(value, Path):
+            return value
+        cleaned = str(value).strip()
+        return Path(cleaned) if cleaned else None
+
     def set_data_dir(self, data_dir: Path) -> None:
         """Sets the plugin data directory and loads persisted settings."""
         self.data_dir = data_dir
         self.load_settings()
+
+    def set_downloads_dir(self, downloads_dir: Path | str | None) -> None:
+        """Sets the host-provided OS Downloads directory (from initialize.permissions.downloadsDir)."""
+        self.downloads_dir = self._coerce_optional_path(downloads_dir)
 
     def load_dotenv(self) -> None:
         """Loads and parses the .env file in the repository root."""
@@ -246,22 +261,35 @@ class ConfigManager:
         codes = [c.strip().lower() for c in lang_str.replace(";", ",").split(",") if c.strip()]
         return codes or ["en"]
 
-    def resolve_download_dir(self) -> Path:
-        """Resolves destination download directory."""
+    def resolve_download_dir(self, *, create: bool = True) -> Path:
+        """Resolves destination download directory.
+
+        Precedence:
+        1. `default_download_dir` setting / `OPENSUBTITLES_DOWNLOAD_DIR` env or `.env`
+        2. Vesta-provided OS downloads directory (`downloads_dir` / `VESTA_DOWNLOADS_DIR`)
+        3. `data_dir / "downloads"`
+        4. `repo_root / "downloads"`
+
+        Pass `create=False` during UI rendering to avoid eagerly creating unused
+        fallback directories on disk.
+        """
         dir_str, _ = self.resolve_field("default_download_dir", "OPENSUBTITLES_DOWNLOAD_DIR")
         if dir_str:
             target = Path(dir_str).expanduser().resolve()
-            target.mkdir(parents=True, exist_ok=True)
-            return target
+        elif self.downloads_dir is not None:
+            target = self.downloads_dir.expanduser().resolve()
+        else:
+            env_downloads = os.environ.get("VESTA_DOWNLOADS_DIR", "").strip()
+            if env_downloads:
+                target = Path(env_downloads).expanduser().resolve()
+            elif self.data_dir:
+                target = self.data_dir / "downloads"
+            else:
+                target = self.repo_root / "downloads"
 
-        if self.data_dir:
-            target = self.data_dir / "downloads"
+        if create:
             target.mkdir(parents=True, exist_ok=True)
-            return target
-
-        fallback = self.repo_root / "downloads"
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
+        return target
 
     def resolve_dry_run(self) -> bool:
         """Resolves dry-run execution preference."""

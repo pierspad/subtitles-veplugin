@@ -124,17 +124,46 @@ def test_settings_persistence(tmp_path: Path):
 
 
 def test_resolve_download_dir(tmp_path: Path):
-    data_dir = tmp_path / "data"
-    mgr = ConfigManager(repo_root=tmp_path, data_dir=data_dir)
-    resolved = mgr.resolve_download_dir()
-    assert resolved == data_dir / "downloads"
-    assert resolved.is_dir()
+    clean_env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("OPENSUBTITLES_DOWNLOAD_DIR", "VESTA_DOWNLOADS_DIR")
+    }
+    with patch.dict(os.environ, clean_env, clear=True):
+        data_dir = tmp_path / "data"
+        mgr = ConfigManager(repo_root=tmp_path, data_dir=data_dir)
 
-    custom_dir = tmp_path / "my_custom_downloads"
-    mgr.update_settings({"default_download_dir": str(custom_dir)}, save=False)
-    resolved_custom = mgr.resolve_download_dir()
-    assert resolved_custom == custom_dir
-    assert resolved_custom.is_dir()
+        # create=False must not eagerly mkdir unused fallback directories
+        non_created = mgr.resolve_download_dir(create=False)
+        assert non_created == data_dir / "downloads"
+        assert not non_created.exists()
+
+        resolved = mgr.resolve_download_dir()
+        assert resolved == data_dir / "downloads"
+        assert resolved.is_dir()
+
+        # VESTA_DOWNLOADS_DIR takes precedence over data_dir/downloads
+        vesta_env_dl = tmp_path / "os_downloads_env"
+        os.environ["VESTA_DOWNLOADS_DIR"] = str(vesta_env_dl)
+        assert mgr.resolve_download_dir(create=False) == vesta_env_dl.resolve()
+        assert not vesta_env_dl.exists()
+
+        # Explicit permissions.downloadsDir takes precedence over VESTA_DOWNLOADS_DIR
+        perm_dl = tmp_path / "os_downloads_perm"
+        mgr.set_downloads_dir(perm_dl)
+        assert mgr.resolve_download_dir(create=False) == perm_dl.resolve()
+
+        # OPENSUBTITLES_DOWNLOAD_DIR env overrides Vesta OS downloadsDir
+        env_override = tmp_path / "env_override_dl"
+        os.environ["OPENSUBTITLES_DOWNLOAD_DIR"] = str(env_override)
+        assert mgr.resolve_download_dir(create=False) == env_override.resolve()
+
+        # default_download_dir setting overrides everything
+        custom_dir = tmp_path / "my_custom_downloads"
+        mgr.update_settings({"default_download_dir": str(custom_dir)}, save=False)
+        resolved_custom = mgr.resolve_download_dir()
+        assert resolved_custom == custom_dir
+        assert resolved_custom.is_dir()
 
 
 class TestConfigSuite(unittest.TestCase):

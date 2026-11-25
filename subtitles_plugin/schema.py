@@ -5,10 +5,10 @@ Produces standard JSON widget trees
 and single-object patch operations compliant with Vesta Plugin System Specification (v1).
 
 Supported Widgets:
-column, row, text, heading, textInput, textArea, passwordInput, numberInput,
+column, row, card, text, heading, textInput, textArea, passwordInput, numberInput,
 pathInput, languageSelect, segmented, select, checkbox, button,
-link / externalLink, list, table, image, progress, fileOutput,
-divider, settings.
+link / externalLink, list, table, image, pagination, progress, fileOutput,
+divider, settings, footer.
 
 Dynamic UI Patching (PluginPatch):
 {
@@ -63,6 +63,40 @@ def row(
     **kwargs: Any,
 ) -> dict[str, Any]:
     node: dict[str, Any] = {"type": "row", "gap": gap, "align": align, "children": children}
+    if id:
+        node["id"] = id
+    if hidden:
+        node["hidden"] = True
+    if expertOnly:
+        node["expertOnly"] = True
+    node.update(kwargs)
+    return node
+
+
+def card(
+    children: list[dict[str, Any]] | None = None,
+    title: str | None = None,
+    subtitle: str | None = None,
+    icon: str | None = None,
+    accent: str | None = None,
+    id: str | None = None,
+    hidden: bool = False,
+    expertOnly: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Construct a styled glass card container widget."""
+    node: dict[str, Any] = {
+        "type": "card",
+        "children": list(children) if children is not None else [],
+    }
+    if title is not None:
+        node["title"] = title
+    if subtitle is not None:
+        node["subtitle"] = subtitle
+    if icon is not None:
+        node["icon"] = icon
+    if accent is not None:
+        node["accent"] = accent
     if id:
         node["id"] = id
     if hidden:
@@ -249,9 +283,13 @@ def path_input(
     icon: str | None = None,
     flex: int | None = None,
     expertOnly: bool = False,
+    clearable: bool | None = None,
+    compact: bool = False,
+    default_dir: str | None = None,
+    default_value: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    initial_val = value if value is not None else defaultValue
+    initial_val = value if value is not None else (default_value if default_value is not None else defaultValue)
     node: dict[str, Any] = {
         "type": "pathInput",
         "id": id,
@@ -275,6 +313,12 @@ def path_input(
         node["flex"] = flex
     if expertOnly:
         node["expertOnly"] = True
+    if clearable is not None:
+        node["clearable"] = clearable
+    if compact:
+        node["compact"] = True
+    if default_dir is not None:
+        node["defaultDir"] = default_dir
     node.update(kwargs)
     return node
 
@@ -456,6 +500,9 @@ def button(
     icon: str | None = None,
     hidden: bool = False,
     expertOnly: bool = False,
+    disabled_tooltip: str | None = None,
+    disabled_focus: str | None = None,
+    requires_any: list[str] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     node: dict[str, Any] = {
@@ -471,6 +518,12 @@ def button(
         node["hidden"] = True
     if expertOnly:
         node["expertOnly"] = True
+    if disabled_tooltip is not None and "disabledTooltip" not in kwargs:
+        node["disabledTooltip"] = disabled_tooltip
+    if disabled_focus is not None and "disabledFocus" not in kwargs:
+        node["disabledFocus"] = disabled_focus
+    if requires_any is not None and "requiresAny" not in kwargs:
+        node["requiresAny"] = requires_any
     node.update(kwargs)
     return node
 
@@ -581,6 +634,8 @@ def image(
     alt: str = "",
     width: int | None = None,
     height: int | None = None,
+    aspect: str | None = None,
+    fit: str | None = None,
     id: str | None = None,
     hidden: bool = False,
     **kwargs: Any,
@@ -590,12 +645,63 @@ def image(
         node["width"] = width
     if height is not None:
         node["height"] = height
+    if aspect is not None:
+        node["aspect"] = aspect
+    if fit is not None:
+        node["fit"] = fit
     if id:
         node["id"] = id
     if hidden:
         node["hidden"] = True
     node.update(kwargs)
     return node
+
+
+def pagination(
+    id: str,
+    page: int = 1,
+    total_pages: int = 1,
+    total_items: int | None = None,
+    page_size: int | None = None,
+    disabled: bool = False,
+    hidden: bool = False,
+    expertOnly: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Construct a host-rendered pagination widget."""
+    node: dict[str, Any] = {
+        "type": "pagination",
+        "id": id,
+        "page": page,
+        "totalPages": total_pages,
+        "disabled": disabled,
+    }
+    if total_items is not None:
+        node["totalItems"] = total_items
+    if page_size is not None:
+        node["pageSize"] = page_size
+    if hidden:
+        node["hidden"] = True
+    if expertOnly:
+        node["expertOnly"] = True
+    node.update(kwargs)
+    return node
+
+
+def footer(
+    left: list[dict[str, Any]] | None = None,
+    center: list[dict[str, Any]] | None = None,
+    right: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Construct a sticky bottom footer payload (`left`, `center`, `right`)."""
+    res: dict[str, Any] = {}
+    if left is not None:
+        res["left"] = left
+    if center is not None:
+        res["center"] = center
+    if right is not None:
+        res["right"] = right
+    return res
 
 
 def progress(

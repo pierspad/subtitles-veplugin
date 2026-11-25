@@ -27,7 +27,7 @@ Once a subtitle is downloaded or extracted, the plugin displays the **Subtitle R
 
 ## Normal vs. Expert Mode
 
-- **Normal Mode**: Subtitle search by title or TMDB/IMDb IDs, preferred language selection, and downloads to a local folder.
+- **Normal Mode**: Single-mode subtitle search by Title, TMDB ID, or IMDb ID (with dedicated TV Series season/episode filters and `S01E01` auto-detection), preferred language selection, and downloads to a local folder.
 - **Expert Mode**: Toggle Expert Mode in Vesta's sidebar to access local video container extraction (FFmpeg/ffprobe), custom executable paths, optional user login for higher download quotas, and dry-run execution.
 
 ## Disclaimer

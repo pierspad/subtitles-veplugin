@@ -186,11 +186,14 @@ class JsonRpcServer:
 
     def _dispatch(self, req_id: Any, method: str, params: dict[str, Any]) -> bool:
         if method == "initialize":
+            perms = params.get("permissions")
+            downloads_dir = perms.get("downloadsDir") if isinstance(perms, dict) else None
             res = self.plugin.initialize(
                 api_version=int(params.get("apiVersion", 1)),
                 data_dir=params.get("dataDir"),
                 locale=str(params.get("locale", "en")),
                 settings=params.get("settings"),
+                downloads_dir=downloads_dir,
             )
             self.send_response(req_id, res)
             return True
@@ -199,7 +202,11 @@ class JsonRpcServer:
             screen_name = str(params.get("screen", "search"))
             render_params = params.get("params")
             root = self.plugin.render_screen(screen_name, values=render_params)
-            self.send_response(req_id, {"root": root})
+            payload: dict[str, Any] = {"root": root}
+            footer_obj = self.plugin.render_footer(screen_name)
+            if footer_obj is not None:
+                payload["footer"] = footer_obj
+            self.send_response(req_id, payload)
             return True
 
         elif method == "event":

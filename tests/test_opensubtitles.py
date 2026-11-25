@@ -340,6 +340,252 @@ def test_search_relevance_filtering_and_ranking():
         assert ids == ["pulp_top", "pulp_low"]
 
 
+def test_parse_poster_url_and_feature_details():
+    creds = OpenSubtitlesCredentials(api_key="test_key", username=None, password=None, source="test")
+    client = OpenSubtitlesClient(credentials=creds)
+
+    payload = {
+        "data": [
+            {
+                "id": "list_http",
+                "attributes": {
+                    "subtitle_id": "3001",
+                    "language": "en",
+                    "download_count": 500,
+                    "release": "Rel.List",
+                    "related_links": [
+                        {"label": "Empty", "img_url": "   "},
+                        {"label": "IMDb", "img_url": "http://s9.osdb.link/poster_list.jpg"},
+                    ],
+                    "feature_details": {
+                        "feature_id": 10,
+                        "movie_name": "List Movie",
+                        "year": "2010",
+                        "imdb_id": 1375666,
+                        "tmdb_id": 27205,
+                    },
+                    "files": [{"file_id": 11, "file_name": "list.srt"}],
+                },
+            },
+            {
+                "id": "dict_https",
+                "attributes": {
+                    "subtitle_id": "3002",
+                    "language": "en",
+                    "download_count": 400,
+                    "release": "Rel.Dict",
+                    "related_links": {"label": "IMDb", "img_url": "https://s9.osdb.link/poster_dict.jpg"},
+                    "feature_details": {"feature_id": 11, "movie_name": "Dict Movie", "year": 1999},
+                    "files": [{"file_id": 12, "file_name": "dict.srt"}],
+                },
+            },
+            {
+                "id": "missing_poster",
+                "attributes": {
+                    "subtitle_id": "3003",
+                    "language": "en",
+                    "download_count": 300,
+                    "release": "Rel.None",
+                    "related_links": [{"label": "NoImg", "img_url": ""}],
+                    "feature_details": {"feature_id": 12, "movie_name": "No Poster Movie"},
+                    "files": [{"file_id": 13, "file_name": "none.srt"}],
+                },
+            },
+        ]
+    }
+    mock_resp = io.BytesIO(json.dumps(payload).encode("utf-8"))
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        results = client.search(languages="en")
+        by_id = {r.id: r for r in results}
+
+        assert by_id["list_http"].poster_url == "https://s9.osdb.link/poster_list.jpg"
+        assert by_id["list_http"].year == 2010
+        assert by_id["list_http"].imdb_id == 1375666
+        assert by_id["list_http"].tmdb_id == 27205
+
+        assert by_id["dict_https"].poster_url == "https://s9.osdb.link/poster_dict.jpg"
+        assert by_id["dict_https"].year == 1999
+
+        assert by_id["missing_poster"].poster_url is None
+
+
+def test_tv_series_search_params_and_fallback():
+    creds = OpenSubtitlesCredentials(api_key="test_key", username=None, password=None, source="test")
+    client = OpenSubtitlesClient(credentials=creds)
+
+    episode_payload = {
+        "data": [
+            {
+                "id": "ep_s01e01",
+                "attributes": {
+                    "subtitle_id": "5001",
+                    "language": "en",
+                    "download_count": 12000,
+                    "ratings": 9.2,
+                    "from_trusted": True,
+                    "hd": True,
+                    "release": "Breaking.Bad.S01E01.720p.BluRay.x264-SiNNERS",
+                    "feature_details": {
+                        "feature_id": 120924,
+                        "feature_type": "Episode",
+                        "year": 2008,
+                        "title": "Pilot",
+                        "movie_name": '"Breaking Bad" Pilot',
+                        "imdb_id": 959621,
+                        "tmdb_id": 62085,
+                        "season_number": 1,
+                        "episode_number": 1,
+                        "parent_imdb_id": 903747,
+                        "parent_title": "Breaking Bad",
+                        "parent_tmdb_id": 1396,
+                        "parent_feature_id": 44123,
+                    },
+                    "files": [{"file_id": 7001, "file_name": "Breaking.Bad.S01E01.srt"}],
+                },
+            }
+        ]
+    }
+
+    # 1. TV Series search by parent IMDb ID + season + episode
+    with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(episode_payload).encode("utf-8"))) as m:
+        res = client.search(
+            imdb_id="tt0903747",
+            languages="en",
+            media_type="tvshow",
+            season_number=1,
+            episode_number=1,
+        )
+        url = m.call_args[0][0].full_url
+        assert "parent_imdb_id=903747" in url
+        assert "type=episode" in url
+        assert "season_number=1" in url
+        assert "episode_number=1" in url
+        assert len(res) == 1
+        assert res[0].is_episode is True
+        assert res[0].episode_code == "S01E01"
+        assert res[0].clean_series_title == "Breaking Bad"
+        assert res[0].display_title == "Breaking Bad — Pilot"
+        assert "S01E01" in res[0].badge_text
+
+    # 2. 'All' mode automatic fallback for bare TV series IMDb ID (like tt0903747)
+    calls = []
+
+    def fake_urlopen(req, timeout=15):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            return io.BytesIO(json.dumps({"data": []}).encode("utf-8"))
+        return io.BytesIO(json.dumps(episode_payload).encode("utf-8"))
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        res = client.search(imdb_id="tt0903747", languages="en", media_type="all")
+        assert len(calls) == 2
+        assert "imdb_id=903747" in calls[0]
+        assert "parent_imdb_id=903747" in calls[1]
+        assert "type=episode" in calls[1]
+        assert len(res) == 1
+        assert res[0].episode_code == "S01E01"
+
+    # 3. Query with embedded S01E01 extracts season/episode & matches parent_title cleanly
+    with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(episode_payload).encode("utf-8"))) as m:
+        res = client.search(query="Breaking Bad S01E01", languages="en")
+        url = m.call_args[0][0].full_url
+        assert "query=Breaking+Bad" in url
+        assert "season_number=1" in url
+        assert "episode_number=1" in url
+        assert "type=episode" in url
+        assert len(res) == 1
+
+    # 4. Whole-season TV search orders episodes S01E01 -> S01E02 -> S01E03
+    season_payload = {
+        "data": [
+            {
+                "id": "ep3",
+                "attributes": {
+                    "subtitle_id": "5003",
+                    "language": "en",
+                    "download_count": 99999,
+                    "release": "Breaking.Bad.S01E03.720p",
+                    "feature_details": {
+                        "feature_type": "Episode",
+                        "parent_title": "Breaking Bad",
+                        "title": "...And the Bag's in the River",
+                        "season_number": 1,
+                        "episode_number": 3,
+                    },
+                    "files": [{"file_id": 7003, "file_name": "bb.s01e03.srt"}],
+                },
+            },
+            {
+                "id": "ep1",
+                "attributes": {
+                    "subtitle_id": "5001",
+                    "language": "en",
+                    "download_count": 5000,
+                    "release": "Breaking.Bad.S01E01.720p",
+                    "feature_details": {
+                        "feature_type": "Episode",
+                        "parent_title": "Breaking Bad",
+                        "title": "Pilot",
+                        "season_number": 1,
+                        "episode_number": 1,
+                    },
+                    "files": [{"file_id": 7001, "file_name": "bb.s01e01.srt"}],
+                },
+            },
+            {
+                "id": "ep2",
+                "attributes": {
+                    "subtitle_id": "5002",
+                    "language": "en",
+                    "download_count": 8000,
+                    "release": "Breaking.Bad.S01E02.720p",
+                    "feature_details": {
+                        "feature_type": "Episode",
+                        "parent_title": "Breaking Bad",
+                        "title": "Cat's in the Bag...",
+                        "season_number": 1,
+                        "episode_number": 2,
+                    },
+                    "files": [{"file_id": 7002, "file_name": "bb.s01e02.srt"}],
+                },
+            },
+        ]
+    }
+    with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(season_payload).encode("utf-8"))):
+        res = client.search(
+            tmdb_id="https://www.themoviedb.org/tv/1396-breaking-bad",
+            season_number=1,
+            languages="en",
+        )
+        assert [r.id for r in res] == ["ep1", "ep2", "ep3"]
+
+    # 5. Leading release year in movie_name ("2011 - Game of Thrones - S00E45 - ...") does not become series title
+    got_special = SubtitleItem(
+        id="got_s00e45",
+        subtitle_id="6001",
+        language="en",
+        download_count=1137,
+        new_download_count=0,
+        hearing_impaired=True,
+        hd=True,
+        fps=23.976,
+        ratings=None,
+        votes=0,
+        from_trusted=True,
+        foreign_parts_only=False,
+        ai_translated=False,
+        machine_translated=False,
+        release="Game.of.Thrones.S00E45.The.Game.Revealed",
+        comments="",
+        movie_name="2011 - Game of Thrones - S00E45 - The Game Revealed Season 8 Episode 1",
+        feature_type="Episode",
+        season_number=0,
+        episode_number=45,
+    )
+    assert got_special.clean_series_title == "Game of Thrones"
+    assert got_special.display_title == "Game of Thrones — The Game Revealed Season 8 Episode 1"
+
+
 class TestOpenSubtitlesSuite(unittest.TestCase):
     def test_all(self):
         test_search_subtitles_filters_machine_and_ai()
@@ -348,6 +594,8 @@ class TestOpenSubtitlesSuite(unittest.TestCase):
         test_test_connection_no_key()
         test_test_connection_success()
         test_search_relevance_filtering_and_ranking()
+        test_parse_poster_url_and_feature_details()
+        test_tv_series_search_params_and_fallback()
         with tempfile.TemporaryDirectory() as td:
             test_download_subtitle(Path(td))
         with tempfile.TemporaryDirectory() as td:

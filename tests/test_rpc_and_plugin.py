@@ -17,12 +17,17 @@ from subtitles_plugin.plugin import SubtitlesPlugin
 from subtitles_plugin.rpc import JsonRpcServer
 from subtitles_plugin.schema import (
     apply_patches,
+    button,
+    card,
     column,
     external_link,
     find_node,
+    footer,
     heading,
+    image,
     language_select,
     make_patch,
+    pagination,
     password_input,
     path_input,
     row,
@@ -376,7 +381,7 @@ def test_ui_layout_and_expert_widgets(tmp_path: Path):
     client = FakeOpenSubtitlesClient()
     plugin = SubtitlesPlugin(config_manager=mgr, opensubtitles_client=client)
 
-    # 1. Search screen layout
+    # 1. Search screen layout: single active search mode + content type selector
     search_root = plugin.render_screen("search")
     q_node, _, _ = find_node(search_root, "search_query")
     assert q_node is not None
@@ -389,15 +394,41 @@ def test_ui_layout_and_expert_widgets(tmp_path: Path):
     assert lang_node["type"] == "languageSelect"
     assert lang_node["flex"] == 1
 
-    tmdb_node, _, _ = find_node(search_root, "search_tmdb_id")
+    mode_node, _, _ = find_node(search_root, "search_mode")
+    assert mode_node is not None
+    assert mode_node["type"] == "segmented"
+
+    media_node, _, _ = find_node(search_root, "search_media_type")
+    assert media_node is not None
+    assert media_node["type"] == "segmented"
+
+    # Only Title input is shown in default 'title' mode
+    assert find_node(search_root, "search_tmdb_id")[0] is None
+    assert find_node(search_root, "search_imdb_id")[0] is None
+    assert find_node(search_root, "search_season")[0] is None
+
+    # Switching to TMDB ID renders ONLY search_tmdb_id
+    tmdb_screen = plugin.handle_event("search", "search_mode", "change", {"search_mode": "tmdb"})["root"]
+    tmdb_node, _, _ = find_node(tmdb_screen, "search_tmdb_id")
     assert tmdb_node is not None
     assert tmdb_node["icon"] == "tmdb"
-    assert tmdb_node["flex"] == 1
+    assert find_node(tmdb_screen, "search_query")[0] is None
+    assert find_node(tmdb_screen, "search_imdb_id")[0] is None
+    assert find_node(tmdb_screen, "btn_do_search")[0]["requiresAny"] == ["search_tmdb_id"]
 
-    imdb_node, _, _ = find_node(search_root, "search_imdb_id")
+    # Switching to IMDb ID renders ONLY search_imdb_id
+    imdb_screen = plugin.handle_event("search", "search_mode", "change", {"search_mode": "imdb"})["root"]
+    imdb_node, _, _ = find_node(imdb_screen, "search_imdb_id")
     assert imdb_node is not None
     assert imdb_node["icon"] == "imdb"
-    assert imdb_node["flex"] == 1
+    assert find_node(imdb_screen, "search_query")[0] is None
+    assert find_node(imdb_screen, "search_tmdb_id")[0] is None
+    assert find_node(imdb_screen, "btn_do_search")[0]["requiresAny"] == ["search_imdb_id"]
+
+    # Switching Content Type to TV Series reveals Season & Episode inputs
+    tv_screen = plugin.handle_event("search", "search_media_type", "change", {"search_media_type": "tvshow"})["root"]
+    assert find_node(tv_screen, "search_season")[0] is not None
+    assert find_node(tv_screen, "search_episode")[0] is not None
 
     # Navigation bar buttons have monochrome icons (Local Video File is inside Settings)
     nav_search, _, _ = find_node(search_root, "btn_nav_search")
@@ -449,12 +480,12 @@ def test_search_guidance_and_local_key(tmp_path: Path):
         root = plugin.render_screen("search")
         search, _, _ = find_node(root, "btn_do_search")
         settings, _, _ = find_node(root, "btn_nav_settings")
-        alternatives, _, _ = find_node(root, "search_id_alternatives")
+        mode_ctrl, _, _ = find_node(root, "search_mode")
         assert search["disabled"] is True
         assert search["disabledFocus"] == "btn_nav_settings"
-        assert search["requiresAny"] == ["search_query", "search_tmdb_id", "search_imdb_id"]
+        assert search["requiresAny"] == ["search_query"]
         assert settings["status"] == "attention"
-        assert alternatives["separator"] == "or"
+        assert mode_ctrl is not None
         assert find_node(root, "api_warning_box")[0] is None
 
         settings_root = plugin.render_screen("settings")
@@ -622,9 +653,293 @@ def test_plugin_emits_vesta_log_and_detects_tmdb_keys(tmp_path: Path):
     assert "TMDB" in save_res["root"]["snackbar"]["message"]
 
 
+def test_schema_new_builders():
+    c = card([text("hello")], title="Selected", icon="subtitles", accent="purple", id="c1")
+    assert c["type"] == "card"
+    assert c["accent"] == "purple"
+    assert c["title"] == "Selected"
+
+    p = pagination("pg1", page=2, total_pages=5, total_items=42, page_size=10)
+    assert p["type"] == "pagination"
+    assert p["page"] == 2
+    assert p["totalPages"] == 5
+    assert p["totalItems"] == 42
+    assert p["pageSize"] == 10
+
+    f = footer(
+        left=[path_input("d1", default_value="/tmp", clearable=False, compact=True, default_dir="downloads")],
+        right=[button("b1", "Go", disabled=True, disabled_tooltip="Need item")],
+    )
+    assert f["left"][0]["clearable"] is False
+    assert f["left"][0]["compact"] is True
+    assert f["left"][0]["defaultDir"] == "downloads"
+    assert f["left"][0]["defaultValue"] == "/tmp"
+    assert f["right"][0]["disabledTooltip"] == "Need item"
+
+    img = image("https://example.com/poster.jpg", alt="Poster", width=130, height=195, aspect="poster", fit="cover")
+    assert img["aspect"] == "poster"
+    assert img["fit"] == "cover"
+    assert img["width"] == 130
+    assert img["height"] == 195
+
+
+def test_initialize_downloads_dir_no_eager_mkdir_and_sticky_footer(tmp_path: Path):
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("OPENSUBTITLES_DOWNLOAD_DIR", "VESTA_DOWNLOADS_DIR")}
+    with patch.dict(os.environ, clean_env, clear=True):
+        os_downloads = tmp_path / "UserDownloads"
+        data_dir = tmp_path / "data"
+        mgr = ConfigManager(repo_root=tmp_path)
+        client = FakeOpenSubtitlesClient()
+        plugin = SubtitlesPlugin(config_manager=mgr, opensubtitles_client=client)
+
+        init_res = plugin.initialize(
+            api_version=1,
+            data_dir=str(data_dir),
+            permissions={"downloadsDir": str(os_downloads)},
+        )
+        assert not (data_dir / "downloads").exists()
+        assert not (tmp_path / "downloads").exists()
+        assert not os_downloads.exists()
+
+        foot = init_res["footer"]
+        dest_node = foot["left"][0]
+        dl_btn = foot["right"][0]
+        assert dest_node["id"] == "download_dest_dir"
+        assert dest_node["defaultValue"] == str(os_downloads.resolve())
+        assert dest_node["clearable"] is False
+        assert dest_node["compact"] is True
+        assert dest_node["defaultDir"] == "downloads"
+        assert dl_btn["id"] == "btn_download_now"
+        assert dl_btn["disabled"] is True
+        assert dl_btn["disabledTooltip"] == "Select a subtitle from the results first"
+
+
+def test_auto_select_poster_card_and_pagination(tmp_path: Path):
+    items = [
+        SubtitleItem(
+            id=f"sub_{i}",
+            subtitle_id=str(1000 + i),
+            language="en",
+            download_count=5000 - i * 10,
+            new_download_count=1,
+            hearing_impaired=False,
+            hd=True,
+            fps=23.976,
+            ratings=8.5,
+            votes=10,
+            from_trusted=(i == 0),
+            foreign_parts_only=False,
+            ai_translated=False,
+            machine_translated=False,
+            release=f"Movie.2024.Release.{i}",
+            comments="",
+            movie_name="Movie",
+            year=2024,
+            poster_url="https://s9.osdb.link/poster.jpg" if i % 2 == 0 else None,
+            files=[SubtitleFile(file_id=5000 + i, cd_number=1, file_name=f"Movie.{i}.srt")],
+        )
+        for i in range(25)
+    ]
+
+    class PagedClient(FakeOpenSubtitlesClient):
+        def search(self, **kwargs) -> list[SubtitleItem]:
+            return items
+
+    mgr = ConfigManager(repo_root=tmp_path, data_dir=tmp_path / "data")
+    plugin = SubtitlesPlugin(config_manager=mgr, opensubtitles_client=PagedClient())
+
+    # Search auto-selects first result, resets page to 1, patches download_custom_name, and enables footer button
+    search_res = plugin.handle_event("search", "btn_do_search", "click", {"search_query": "Movie"})
+    assert plugin.selected_subtitle is not None
+    assert plugin.selected_subtitle.id == "sub_0"
+    assert plugin.current_page == 1
+    assert search_res["patch"]["values"]["download_custom_name"] == "Movie.0.srt"
+    assert search_res["footer"]["right"][0]["disabled"] is False
+
+    # Selected card contains metadata+input on left and poster image on right
+    card_node, _, _ = find_node(search_res["root"], "selected_subtitle_card")
+    assert card_node is not None
+    assert card_node["type"] == "card"
+    assert card_node["accent"] == "purple"
+    poster_node, _, _ = find_node(card_node, "selected_poster_image")
+    assert poster_node is not None
+    assert poster_node["src"] == "https://s9.osdb.link/poster.jpg"
+    assert poster_node["aspect"] == "poster"
+    assert poster_node["fit"] == "cover"
+
+    # List renders 10 items on page 1 and no per-row posters
+    list_node, _, _ = find_node(search_res["root"], "search_results_list")
+    assert list_node is not None
+    assert len(list_node["items"]) == 10
+    assert list_node["items"][0]["id"] == "item_sub_0"
+    assert list_node["items"][9]["id"] == "item_sub_9"
+    assert all("image" not in item for item in list_node["items"])
+
+    # Pagination widget present
+    pg_node, _, _ = find_node(search_res["root"], "results_pagination")
+    assert pg_node is not None
+    assert pg_node["page"] == 1
+    assert pg_node["totalPages"] == 3
+    assert pg_node["totalItems"] == 25
+    assert pg_node["pageSize"] == 10
+
+    # Switch to page 2
+    page2_res = plugin.handle_event("search", "results_pagination", "change", {"results_pagination": 2})
+    assert page2_res.get("scrollTop") is True
+    assert plugin.current_page == 2
+    list_p2, _, _ = find_node(page2_res["root"], "search_results_list")
+    assert len(list_p2["items"]) == 10
+    assert list_p2["items"][0]["id"] == "item_sub_10"
+    assert list_p2["items"][9]["id"] == "item_sub_19"
+
+    # Select item without poster on page 2 -> patches download_custom_name and hides poster image
+    sel_res = plugin.handle_event("search", "action_select_sub_11", "click", {})
+    assert plugin.selected_subtitle.id == "sub_11"
+    assert sel_res["patch"]["values"]["download_custom_name"] == "Movie.11.srt"
+    assert find_node(sel_res["root"], "selected_poster_image")[0] is None
+    assert plugin.current_page == 2
+
+    # Switch to page 3 -> remaining 5 items
+    page3_res = plugin.handle_event("search", "results_pagination", "change", {"results_pagination": 3})
+    list_p3, _, _ = find_node(page3_res["root"], "search_results_list")
+    assert len(list_p3["items"]) == 5
+    assert list_p3["items"][0]["id"] == "item_sub_20"
+
+
+def test_json_rpc_initialize_permissions_and_render_footer(tmp_path: Path):
+    dl_dir = tmp_path / "RpcDownloads"
+    in_stream = io.StringIO(
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"apiVersion": 1, "permissions": {"downloadsDir": str(dl_dir)}},
+        }) + "\n"
+        + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "render", "params": {"screen": "search"}}) + "\n"
+        + json.dumps({"jsonrpc": "2.0", "id": 3, "method": "render", "params": {"screen": "settings"}}) + "\n"
+        + json.dumps({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": {}}) + "\n"
+    )
+    out_stream = io.StringIO()
+    mgr = ConfigManager(repo_root=tmp_path)
+    plugin = SubtitlesPlugin(config_manager=mgr, opensubtitles_client=FakeOpenSubtitlesClient())
+    server = JsonRpcServer(plugin=plugin, input_stream=in_stream, output_stream=out_stream)
+    server.run()
+
+    lines = [json.loads(line) for line in out_stream.getvalue().strip().splitlines() if line]
+    assert len(lines) == 4
+    assert lines[0]["result"]["footer"]["left"][0]["defaultValue"] == str(dl_dir.resolve())
+    assert lines[1]["result"]["footer"]["left"][0]["id"] == "download_dest_dir"
+    assert "footer" not in lines[2]["result"]
+
+
+def test_single_search_mode_isolation_and_tv_series_ui(tmp_path: Path):
+    captured_calls: list[dict[str, Any]] = []
+
+    class CapturingClient(FakeOpenSubtitlesClient):
+        def search(self, **kwargs) -> list[SubtitleItem]:
+            captured_calls.append(kwargs)
+            return [
+                SubtitleItem(
+                    id="bb_ep1",
+                    subtitle_id="9001",
+                    language="en",
+                    download_count=15000,
+                    new_download_count=100,
+                    hearing_impaired=False,
+                    hd=True,
+                    fps=23.976,
+                    ratings=9.4,
+                    votes=80,
+                    from_trusted=True,
+                    foreign_parts_only=False,
+                    ai_translated=False,
+                    machine_translated=False,
+                    release="Breaking.Bad.S01E01.720p.BluRay",
+                    comments="",
+                    movie_name='"Breaking Bad" Pilot',
+                    year=2008,
+                    feature_type="Episode",
+                    parent_title="Breaking Bad",
+                    episode_title="Pilot",
+                    season_number=1,
+                    episode_number=1,
+                    parent_imdb_id=903747,
+                    parent_tmdb_id=1396,
+                    files=[SubtitleFile(file_id=9910, cd_number=1, file_name="Breaking.Bad.S01E01.srt")],
+                )
+            ]
+
+    mgr = ConfigManager(repo_root=tmp_path, data_dir=tmp_path / "data")
+    plugin = SubtitlesPlugin(config_manager=mgr, opensubtitles_client=CapturingClient())
+
+    # Even if stale values exist for multiple fields, IMDb mode sends ONLY imdb_id (never query/tmdb_id)
+    res = plugin.handle_event(
+        "search",
+        "btn_do_search",
+        "click",
+        {
+            "search_mode": "imdb",
+            "search_media_type": "tvshow",
+            "search_query": "Breaking Bad",
+            "search_tmdb_id": "1396",
+            "search_imdb_id": "tt0903747",
+            "search_season": "S01",
+            "search_episode": "1",
+            "search_languages": "en",
+        },
+    )
+    assert len(captured_calls) == 1
+    call = captured_calls[0]
+    assert call["query"] == ""
+    assert call["tmdb_id"] is None
+    assert call["imdb_id"] == 903747
+    assert call["media_type"] == "tvshow"
+    assert call["season_number"] == 1
+    assert call["episode_number"] == 1
+
+    # Selected card shows Series & Episode lines cleanly
+    card_node, _, _ = find_node(res["root"], "selected_subtitle_card")
+    assert card_node is not None
+    rendered_texts = json.dumps(card_node)
+    assert "Series: Breaking Bad (2008)" in rendered_texts
+    assert "Episode: S01E01" in rendered_texts
+    assert "Pilot" in rendered_texts
+
+    # List item shows clean series/episode title + S01E01 badge
+    list_node, _, _ = find_node(res["root"], "search_results_list")
+    assert list_node is not None
+    item = list_node["items"][0]
+    assert item["title"] == "Breaking Bad — Pilot"
+    assert "S01E01" in item["badge"]
+
+    # Invalid TMDB ID produces a clear validation error without calling client
+    bad_res = plugin.handle_event(
+        "search",
+        "btn_do_search",
+        "click",
+        {"search_mode": "tmdb", "search_tmdb_id": "not-an-id"},
+    )
+    assert len(captured_calls) == 1
+    assert plugin.status_variant == "danger"
+    assert "Invalid TMDB ID" in (plugin.status_message or "")
+
+    # Switching from tvshow back to movie clears season & episode
+    switch_res = plugin.handle_event(
+        "search",
+        "search_media_type",
+        "change",
+        {"search_media_type": "movie", "search_season": "1", "search_episode": "2"},
+    )
+    assert plugin.search_season == ""
+    assert plugin.search_episode == ""
+    assert switch_res["patch"]["values"] == {"search_season": "", "search_episode": ""}
+    assert find_node(switch_res["root"], "search_season")[0] is None
+
+
 class TestRpcAndPluginSuite(unittest.TestCase):
     def test_all(self):
         test_schema_single_object_patch()
+        test_schema_new_builders()
         for fn in (
             test_plugin_full_flow,
             test_plugin_local_extraction_flow,
@@ -636,6 +951,10 @@ class TestRpcAndPluginSuite(unittest.TestCase):
             test_vesta_cli_inspect_and_sync_workflow,
             test_rpc_send_request_synchronous_response,
             test_plugin_emits_vesta_log_and_detects_tmdb_keys,
+            test_initialize_downloads_dir_no_eager_mkdir_and_sticky_footer,
+            test_auto_select_poster_card_and_pagination,
+            test_json_rpc_initialize_permissions_and_render_footer,
+            test_single_search_mode_isolation_and_tv_series_ui,
         ):
             with tempfile.TemporaryDirectory() as td:
                 fn(Path(td))
