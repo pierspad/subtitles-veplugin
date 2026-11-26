@@ -1,7 +1,7 @@
 {
   "id": "subtitles-veplugin",
   "name": "Subtitles",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "apiVersion": 1,
   "description": "Subtitle search via OpenSubtitles, local video track extraction, Vesta CLI subtitle inspection & retiming, and flashcards integration for Vesta.",
   "author": "pierspad",
@@ -49,6 +49,13 @@
       "type": "text",
       "description": "Destination folder for downloaded subtitles",
       "defaultValue": ""
+    },
+    {
+      "id": "open_downloads_after_download",
+      "label": "Open Downloads after saving a subtitle",
+      "type": "checkbox",
+      "description": "Turn off to stay in Search and download several subtitles before opening Downloads",
+      "defaultValue": true
     },
     {
       "id": "opensubtitles_username",

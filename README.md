@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Subtitles
 
-Subtitles is a first-party subtitle search, inspection, retiming, and extraction plugin for [Vesta](https://github.com/pierspad/vesta). It discovers and downloads human-authored subtitles from OpenSubtitles, extracts embedded tracks from local video containers via FFmpeg, inspects and retimes `.srt` subtitles through the native `vesta.cli` bridge, and integrates directly with Vesta Flashcards.
+Subtitles is a first-party subtitle search, inspection, retiming, and extraction plugin for [Vesta](https://github.com/pierspad/vesta). It discovers and downloads human-authored subtitles from OpenSubtitles, extracts embedded tracks from local video containers via FFmpeg, inspects and retimes `.srt` subtitles through the native `vesta.cli` bridge, and integrates directly with Vesta Flashcards and Synchronize.
 
 ## Install in Vesta
 
@@ -19,9 +19,31 @@ plugin card to copy later changes from that folder.
 2. Request a Consumer API key at [opensubtitles.com/en/consumers](https://www.opensubtitles.com/en/consumers).
 3. Enter your Consumer API Key in the plugin Settings view.
 
-## Subtitle Revision & Retiming (`vesta.cli`)
+## Downloads and Vesta workflows
 
-Once a subtitle is downloaded or extracted, the plugin displays the **Subtitle Revision & Retiming (Vesta CLI)** panel:
+Use **Downloads**, to the left of **Settings**, to view up to 200 recent downloads, including files from previous sessions. Selecting another search result does not change the saved file or its language. Each saved file has actions to copy its path, open it, or open its containing folder.
+
+In **Settings**, turn off **Open Downloads after saving a subtitle** to keep the
+search results and continue downloading. The preference is saved between sessions;
+by default each successful download opens Downloads.
+
+Each history entry has a **Remove** action. Confirm to remove the entry only, or
+select **Also delete the SRT file from disk** to delete that subtitle too.
+The file option starts unchecked; associated videos are always kept. Dry-run mode
+keeps both the history and files.
+
+Choose a **Matching video (optional)** from the same film or episode. Flashcards uses it for audio, images and clips; Synchronize uses it to preview and adjust timing. Leave it empty for subtitle-only work. The field includes a tooltip explaining both uses.
+
+- **Use in Flashcards** opens the selected download and optional video. The subtitle language comes from the downloaded result's OpenSubtitles metadata, independently of later searches or ambiguous filename markers such as `HI` (hearing impaired).
+- **Use in Synchronize** opens the same files in Vesta's timing workspace. Vesta asks before replacing an existing session and waits while synchronization is busy. This requires a Vesta build supporting `vesta.openInSynchronize`.
+
+The Flashcards and Synchronize actions use their workspace colors (amber and cyan)
+in Vesta builds supporting the corresponding button variants. Older hosts display
+the actions with their default styling.
+
+## Advanced subtitle tools (`vesta.cli`)
+
+In **Expert Mode**, the Downloads page also exposes the **Subtitle Revision & Retiming (Vesta CLI)** panel:
 - **Inspect Cues (`vesta-cli extract`)**: Calls `vesta.cli` (`extract --input <file> --json`) to inspect cue count, timing span, and preview the first cues in a declarative `table` widget.
 - **Apply Time Shift (`vesta-cli sync`)**: Shifts all subtitle timestamps by any positive or negative millisecond offset via `vesta.cli` (`sync --input <file> --output <shifted.srt> --offset-ms <ms>`) before handing the file off to Flashcards via `vesta.openInFlashcards`.
 

@@ -1,0 +1,55 @@
+name: Test and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m pytest -q
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Check tag and package installable source
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json, os, tomllib
+          from pathlib import Path
+          from subtitles_plugin import __version__
+          manifest = json.loads(Path('vesta-plugin.json').read_text())
+          project = tomllib.loads(Path('pyproject.toml').read_text())['project']
+          assert os.environ['RELEASE_TAG'] == f'v{__version__}'
+          assert manifest['version'] == project['version'] == __version__
+          PY
+          git archive --format=zip --output="subtitles-veplugin-${RELEASE_TAG}.zip" HEAD \
+            LICENSE README.md main.py icon.png vesta-plugin.json pyproject.toml subtitles_plugin
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" "subtitles-veplugin-${RELEASE_TAG}.zip" \
+            --verify-tag --title "Subtitles ${RELEASE_TAG}" --notes-file RELEASE_NOTES.md

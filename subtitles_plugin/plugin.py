@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
+from subtitles_plugin.downloads import DownloadHistory
 from subtitles_plugin.config import ConfigManager, OpenSubtitlesCredentials
 from subtitles_plugin.extractor import ExtractionResult, LocalSubExtractor, SubtitleTrackInfo
 from subtitles_plugin.opensubtitles import (
@@ -93,6 +94,9 @@ class SubtitlesPlugin:
         self.last_search_executed: bool = False
         self.downloaded_subtitle_path: str | None = None
         self.associated_video_path: str = ""
+        self.downloaded_subtitle_language: str = ""
+        self.download_history = DownloadHistory(self.config_manager.data_dir)
+        self.pending_removal: dict[str, str] | None = None
 
         # Local File Extraction State
         self.local_video_path: str = ""
@@ -163,12 +167,12 @@ class SubtitlesPlugin:
         if self.notifier and callable(self.notifier):
             self.notifier("ui.progress", {"id": id, "value": value, "label": label})
 
-    def open_in_flashcards(self, video_path: str, subtitle_path: str) -> None:
+    def open_in_flashcards(self, video_path: str, subtitle_path: str, subtitle_language: str = "") -> None:
         """Emits 'vesta.openInFlashcards' notification to switch to Flashcards."""
         if self.notifier and callable(self.notifier):
             self.notifier(
                 "vesta.openInFlashcards",
-                {"videoPath": str(video_path), "subtitlePath": str(subtitle_path)},
+                {"videoPath": str(video_path), "subtitlePath": str(subtitle_path), "subtitleLanguage": subtitle_language},
             )
 
     def get_values(self, screen: str = "search") -> dict[str, Any]:
@@ -228,6 +232,7 @@ class SubtitlesPlugin:
         """Handles Vesta 'initialize' method."""
         if data_dir:
             self.config_manager.set_data_dir(Path(data_dir))
+            self.download_history = DownloadHistory(self.config_manager.data_dir)
         resolved_downloads_dir = downloads_dir
         if resolved_downloads_dir is None and isinstance(permissions, dict):
             raw_dl = permissions.get("downloadsDir")
@@ -269,6 +274,8 @@ class SubtitlesPlugin:
 
         if normalized == "search":
             root = self._render_search_screen(values)
+        elif normalized == "downloads":
+            root = self._render_downloads_screen(values)
         elif normalized == "local":
             root = self._render_local_screen(values)
         elif normalized == "settings":
@@ -399,6 +406,134 @@ class SubtitlesPlugin:
             )
         return widgets
 
+    def _render_downloads_screen(self, values: dict[str, Any] | None = None) -> dict[str, Any]:
+        children = [heading("Downloads", level=2, icon="download"), self._settings_action()]
+        if self.pending_removal:
+            path = self.pending_removal["path"]
+            children.append(card([
+                text("Remove this subtitle from download history?"),
+                text(path, variant="muted", size="sm"),
+                checkbox("remove_srt_file", label="Also delete the SRT file from disk",
+                         defaultValue=False, disabled=Path(path).suffix.lower() != ".srt" or not Path(path).is_file()),
+                text("The file is kept unless you select the option above. Associated videos are never deleted.", variant="muted", size="sm"),
+                row([button("btn_confirm_remove_download", "Remove download", variant="danger", icon="trash"),
+                     button("btn_cancel_remove_download", "Cancel", variant="secondary")], gap=2),
+            ], title="Remove download", icon="trash"))
+        if self.downloaded_subtitle_path:
+            entry = next((item for item in self.download_history.items if item["path"] == self.downloaded_subtitle_path), None)
+            children.extend([
+                card([
+                    file_output(self.downloaded_subtitle_path, label="Saved subtitle"),
+                    text(f"Subtitle language: {self.downloaded_subtitle_language.upper() or 'Unknown'}", variant="muted", size="sm"),
+                    path_input(
+                        "video_for_flashcards", label="Matching video (optional)",
+                        placeholder="Choose the video for this subtitle…", defaultValue=self.associated_video_path,
+                        picker="file", mode="file", filters=[{"name": "Video", "extensions": ["mp4", "mkv", "avi", "webm", "mov"]}],
+                        tooltip="Choose the same film or episode. Flashcards uses it for audio, images and clips; Synchronize uses it to preview and adjust subtitle timing. Leave empty to use subtitles only.",
+                        helpText="Add the same film or episode for media flashcards and timing preview. Subtitles also work on their own.",
+                    ),
+                    row([
+                        button("btn_use_in_flashcards", "Use in Flashcards", variant="flashcards", icon="cards"),
+                        button("btn_use_in_synchronize", "Use in Synchronize", variant="synchronize", icon="refresh",
+                               tooltip="Open this subtitle in Vesta Synchronize to preview it and adjust its timing."),
+                    ], gap=2),
+                ], title=entry["title"] if entry else Path(self.downloaded_subtitle_path).name, icon="subtitles"),
+                *[dict(node, expertOnly=True) for node in self._render_cli_revision_section()],
+                divider(),
+            ])
+        items = [list_item(
+            id=f"download_{index}", title=entry["title"] or Path(entry["path"]).name,
+            subtitle=entry["path"], meta=[entry["language"].upper()] if entry["language"] else [],
+            badge="Selected" if entry["path"] == self.downloaded_subtitle_path else None,
+            actions=[button(f"action_download_{index}", "Select", variant="secondary", icon="file"),
+                     button(f"action_remove_download_{index}", "Remove", variant="danger", icon="trash")],
+        ) for index, entry in enumerate(self.download_history.items)]
+        if items:
+            children.extend([heading(f"Downloaded subtitles ({len(items)})", level=3), list_widget(items=items)])
+        else:
+            children.append(text("No downloads yet. Search for a subtitle and choose Download Subtitle.", variant="muted"))
+        return column(children, gap=3, id="downloads_screen")
+
+    def _request_remove_download(self, index: str, values: dict[str, Any]) -> dict[str, Any]:
+        try:
+            number = int(index)
+            if number < 0:
+                raise IndexError(number)
+            self.pending_removal = dict(self.download_history.items[number])
+        except (ValueError, IndexError):
+            self.pending_removal = None
+        self._save_download_video(values)
+        return self._screen_response("downloads", values, patch={"values": {"remove_srt_file": False}}, scrollTop=True)
+
+    def _cancel_remove_download(self, values: dict[str, Any]) -> dict[str, Any]:
+        self.pending_removal = None
+        return self._screen_response("downloads", values, patch={"values": {"remove_srt_file": False}})
+
+    def _confirm_remove_download(self, values: dict[str, Any]) -> dict[str, Any]:
+        item = self.pending_removal
+        if not item or not any(entry["path"] == item["path"] for entry in self.download_history.items):
+            return self._cancel_remove_download(values)
+        if self.config_manager.resolve_dry_run():
+            self.notify("[Dry-run] No download entry or file was removed.")
+            return self._cancel_remove_download(values)
+        try:
+            if values.get("remove_srt_file") is True:
+                path = Path(item["path"])
+                if path.suffix.lower() != ".srt":
+                    raise ValueError("Only SRT files can be deleted from download history.")
+                path.unlink(missing_ok=True)
+            self.download_history.remove(item["path"])
+        except (OSError, ValueError) as error:
+            self.notify(f"Could not remove download: {error}", level="error")
+            return self._screen_response("downloads", values)
+        if self.downloaded_subtitle_path == item["path"]:
+            self.downloaded_subtitle_path = None
+            self.downloaded_subtitle_language = ""
+            self.associated_video_path = ""
+            self.cli_inspection_summary = None
+            self.cli_preview_rows = []
+        self.notify("Download removed.", level="success")
+        return self._cancel_remove_download(values)
+
+    def _select_download(self, index: str, values: dict[str, Any]) -> dict[str, Any]:
+        try:
+            number = int(index)
+            if number < 0:
+                raise IndexError(number)
+            item = self.download_history.items[number]
+        except (ValueError, IndexError):
+            return self._screen_response("downloads", values)
+        self._save_download_video(values)
+        item = next(entry for entry in self.download_history.items if entry["path"] == item["path"])
+        self.downloaded_subtitle_path = item["path"]
+        self.downloaded_subtitle_language = item["language"]
+        self.associated_video_path = item["video"]
+        self.cli_inspection_summary = None
+        self.cli_preview_rows = []
+        return self._screen_response("downloads", values, patch={"values": {"video_for_flashcards": item["video"]}})
+
+    def _save_download_video(self, values: dict[str, Any]) -> None:
+        if "video_for_flashcards" not in values or not self.downloaded_subtitle_path:
+            return
+        self.associated_video_path = str(values["video_for_flashcards"] or "").strip()
+        entry = next((item for item in self.download_history.items if item["path"] == self.downloaded_subtitle_path), None)
+        if entry is not None and entry["video"] != self.associated_video_path:
+            self._remember_download(dict(entry, video=self.associated_video_path))
+
+    def _remember_download(self, item: dict[str, Any]) -> None:
+        try:
+            self.download_history.remember(item)
+        except OSError as error:
+            self.notify(f"Subtitle is available, but download history could not be saved: {error}", level="warn")
+
+    def _handle_synchronize_event(self, values: dict[str, Any]) -> dict[str, Any]:
+        self._save_download_video(values)
+        if self.downloaded_subtitle_path and self.notifier:
+            self.notifier("vesta.openInSynchronize", {
+                "subtitlePath": self.downloaded_subtitle_path, "videoPath": self.associated_video_path,
+            })
+        return {}
+
     # Screen: Search
 
     @staticmethod
@@ -461,6 +596,7 @@ class SubtitlesPlugin:
         is_tv = self.search_media_type == "tvshow"
 
         children: list[dict[str, Any]] = [
+            button("btn_nav_downloads", "Downloads", variant="secondary", icon="download", placement="header"),
             self._settings_action(),
             self._render_status_banner(),
         ]
@@ -662,31 +798,6 @@ class SubtitlesPlugin:
                 ]
             )
 
-        # Downloaded Subtitle & Flashcards Handoff
-        if self.downloaded_subtitle_path:
-            children.extend(
-                [
-                    heading("Subtitle Downloaded", level=3),
-                    file_output(self.downloaded_subtitle_path, label="Saved Subtitle (.srt)"),
-                    path_input(
-                        "video_for_flashcards",
-                        label="Associated Video File (optional, for Flashcards)",
-                        placeholder="Path to matching video file...",
-                        defaultValue=self.associated_video_path,
-                        picker="file",
-                        mode="file",
-                    ),
-                    row(
-                        [
-                            button("btn_use_in_flashcards", "Use in Flashcards", variant="primary"),
-                        ],
-                        gap=2,
-                    ),
-                    *self._render_cli_revision_section(),
-                    divider(),
-                ]
-            )
-
         # Search Results List (paginated at PAGE_SIZE per page)
         if self.search_results:
             total_items = len(self.search_results)
@@ -876,7 +987,7 @@ class SubtitlesPlugin:
                     file_output(self.extracted_subtitle_path, label="Subtitle File (.srt)"),
                     row(
                         [
-                            button("btn_use_in_flashcards_local", "Use in Flashcards", variant="primary"),
+                            button("btn_use_in_flashcards_local", "Use in Flashcards", icon="cards", variant="primary"),
                         ],
                         gap=2,
                     ),
@@ -949,6 +1060,12 @@ class SubtitlesPlugin:
                     ],
                     gap=3,
                 ),
+                checkbox(
+                    "cfg_open_downloads_after_download",
+                    label="Open Downloads after saving a subtitle",
+                    defaultValue=settings.open_downloads_after_download,
+                ),
+                text("Turn off to keep searching and download several subtitles before opening Downloads.", variant="muted", size="sm"),
                 row(
                     [
                         text_input(
@@ -1064,7 +1181,7 @@ class SubtitlesPlugin:
             children.extend(
                 [
                     file_output(self.extracted_subtitle_path, label="Extracted Subtitle (.srt)", expertOnly=True),
-                    button("btn_use_in_flashcards_local", "Use in Flashcards", variant="primary", expertOnly=True),
+                    button("btn_use_in_flashcards_local", "Use in Flashcards", icon="cards", variant="primary", expertOnly=True),
                 ]
             )
 
@@ -1082,9 +1199,13 @@ class SubtitlesPlugin:
         destination = {
             "btn_nav_search": "main",
             "btn_nav_local": "local",
+            "btn_nav_downloads": "downloads",
             "btn_nav_settings": "settings",
         }.get(widget_id)
         if destination:
+            self.pending_removal = None
+            self._save_download_video(values)
+            self._sync_search_inputs_from_values(values)
             self.status_message = None
             return self._screen_response(destination, values, screen=destination)
 
@@ -1104,6 +1225,9 @@ class SubtitlesPlugin:
             "btn_clear_search": self._clear_search,
             "btn_download_now": self._handle_download_event,
             "btn_use_in_flashcards": self._handle_flashcards_event,
+            "btn_use_in_synchronize": self._handle_synchronize_event,
+            "btn_confirm_remove_download": self._confirm_remove_download,
+            "btn_cancel_remove_download": self._cancel_remove_download,
             "btn_inspect_tracks": self._handle_inspect_tracks,
             "btn_use_in_flashcards_local": self._handle_flashcards_local_event,
             "btn_save_settings": self._handle_save_settings,
@@ -1116,6 +1240,8 @@ class SubtitlesPlugin:
             return handler(values)
 
         for prefix, handler in (
+            ("action_remove_download_", self._request_remove_download),
+            ("action_download_", self._select_download),
             ("action_select_", self._handle_select_subtitle),
             ("action_extract_", self._handle_extract_track),
             ("action_use_key_", self._use_key),
@@ -1361,6 +1487,7 @@ class SubtitlesPlugin:
         return self._screen_response("search", values, **extra)
 
     def _handle_download_event(self, values: dict[str, Any]) -> dict[str, Any]:
+        self._save_download_video(values)
         if not self.selected_subtitle:
             self.status_message = "No subtitle selected for download."
             self.status_variant = "danger"
@@ -1398,7 +1525,13 @@ class SubtitlesPlugin:
                 self.status_variant = "success"
                 self.notify(self.status_message, level="success")
 
+            self.downloaded_subtitle_language = self.selected_subtitle.language
+            self.associated_video_path = ""
+            self._remember_download({"path": str(out_path), "language": self.downloaded_subtitle_language,
+                                     "title": self.selected_subtitle.display_title or custom_name, "video": ""})
             self.report_progress("dl_op", 100.0, "Download complete")
+            destination = "downloads" if self.config_manager.settings.open_downloads_after_download else "search"
+            return self._screen_response(destination, values, screen=destination, patch={"values": {"video_for_flashcards": ""}})
         except Exception as e:
             self.status_message = f"Download failed: {e}"
             self.status_variant = "danger"
@@ -1407,7 +1540,8 @@ class SubtitlesPlugin:
         return self._screen_response("search", values)
 
     def _handle_flashcards_event(self, values: dict[str, Any]) -> dict[str, Any]:
-        vid_path = str(values.get("video_for_flashcards") or self.associated_video_path or "").strip()
+        self._save_download_video(values)
+        vid_path = self.associated_video_path
         sub_path = str(self.downloaded_subtitle_path or "").strip()
 
         if not sub_path:
@@ -1417,10 +1551,11 @@ class SubtitlesPlugin:
             return self._screen_response("search", values)
 
         self.associated_video_path = vid_path
-        self.open_in_flashcards(video_path=vid_path, subtitle_path=sub_path)
-        self.status_message = f"Emitted vesta.openInFlashcards with {Path(sub_path).name}"
+        self.open_in_flashcards(video_path=vid_path, subtitle_path=sub_path,
+                                subtitle_language=self.downloaded_subtitle_language if sub_path == self.downloaded_subtitle_path else "")
+        self.status_message = f"Opened in Flashcards: {Path(sub_path).name}"
         self.status_variant = "success"
-        self.notify("Loaded subtitle and video into Vesta Flashcards tab!", level="success")
+        self.notify("Opened subtitle in Flashcards.", level="success")
 
         # Emit live patch update for instant feedback
         patch = make_patch(
@@ -1428,7 +1563,7 @@ class SubtitlesPlugin:
                 "status_banner": {"text": self.status_message, "variant": "success", "hidden": False}
             }
         )
-        self.emit_ui_update(screen="search", patch=patch)
+        self.emit_ui_update(screen="downloads", patch=patch)
         return {"patch": patch}
 
     def _handle_inspect_tracks(self, values: dict[str, Any]) -> dict[str, Any]:
@@ -1502,7 +1637,8 @@ class SubtitlesPlugin:
             self.notify(self.status_message, level="warn")
             return {"root": self.render_screen(target_screen, values)}
 
-        self.open_in_flashcards(video_path=vid_path, subtitle_path=sub_path)
+        self.open_in_flashcards(video_path=vid_path, subtitle_path=sub_path,
+                                subtitle_language=self.downloaded_subtitle_language if sub_path == self.downloaded_subtitle_path else "")
         self.status_message = f"Loaded extracted subtitle into Flashcards ({Path(sub_path).name})"
         self.status_variant = "success"
         self.notify("Loaded extracted track into Vesta Flashcards tab!", level="success")
@@ -1532,6 +1668,7 @@ class SubtitlesPlugin:
             "opensubtitles_password": values.get("cfg_password", ""),
             "preferred_languages": values.get("cfg_preferred_languages", "en"),
             "default_download_dir": values.get("cfg_default_download_dir", ""),
+            "open_downloads_after_download": values.get("cfg_open_downloads_after_download", self.config_manager.settings.open_downloads_after_download),
             "dry_run_default": values.get("cfg_dry_run_default", False),
             "ffmpeg_path": values.get("cfg_ffmpeg_path", ""),
             "ffprobe_path": values.get("cfg_ffprobe_path", ""),
@@ -1574,7 +1711,7 @@ class SubtitlesPlugin:
         if self.current_screen in ("local", "settings") and self.extracted_subtitle_path:
             return self.current_screen, self.extracted_subtitle_path
         if self.downloaded_subtitle_path:
-            return "search", self.downloaded_subtitle_path
+            return "downloads", self.downloaded_subtitle_path
         if self.extracted_subtitle_path:
             return "local", self.extracted_subtitle_path
         return "search", ""
@@ -1697,6 +1834,8 @@ class SubtitlesPlugin:
 
         if target_screen == "search" or self.downloaded_subtitle_path == sub_path:
             self.downloaded_subtitle_path = str(out_path)
+            self._remember_download({"path": str(out_path), "language": self.downloaded_subtitle_language,
+                                     "title": out_path.name, "video": self.associated_video_path})
         else:
             self.extracted_subtitle_path = str(out_path)
 

@@ -103,6 +103,7 @@ class PluginSettings:
     opensubtitles_password: str = ""
     preferred_languages: str = ""
     default_download_dir: str = ""
+    open_downloads_after_download: bool = True
     dry_run_default: bool = False
     ffmpeg_path: str = ""
     ffprobe_path: str = ""
@@ -207,6 +208,9 @@ class ConfigManager:
             self.settings.preferred_languages = str(data["preferred_languages"]).strip()
         if "default_download_dir" in data:
             self.settings.default_download_dir = str(data["default_download_dir"]).strip()
+        if "open_downloads_after_download" in data:
+            value = data["open_downloads_after_download"]
+            self.settings.open_downloads_after_download = value.lower() in ("true", "1", "yes") if isinstance(value, str) else bool(value)
         if "dry_run_default" in data:
             val = data["dry_run_default"]
             if isinstance(val, str):

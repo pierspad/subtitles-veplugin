@@ -958,3 +958,153 @@ class TestRpcAndPluginSuite(unittest.TestCase):
         ):
             with tempfile.TemporaryDirectory() as td:
                 fn(Path(td))
+
+
+def test_download_history_keeps_metadata_separate_from_search_and_clears_video(tmp_path: Path):
+    client = FakeOpenSubtitlesClient()
+    notifications = []
+    plugin = SubtitlesPlugin(config_manager=ConfigManager(repo_root=tmp_path, data_dir=tmp_path / "data"),
+                             opensubtitles_client=client, notifier=lambda method, params: notifications.append((method, params)))
+    plugin.initialize(data_dir=str(tmp_path / "data"))
+    plugin.handle_event("search", "btn_do_search", "click", {"search_query": "Matrix"})
+    result = plugin.handle_event("search", "btn_download_now", "click", {
+        "download_dest_dir": str(tmp_path / "subs"), "download_custom_name": "Matrix-NTG-HI.srt"})
+    assert result["screen"] == "downloads"
+    assert find_node(result["root"], "btn_use_in_synchronize")[0]["icon"] == "refresh"
+    assert find_node(result["root"], "btn_use_in_flashcards")[0]["icon"] == "cards"
+    assert find_node(plugin.render_screen("search"), "video_for_flashcards")[0] is None
+    assert find_node(plugin.render_screen("search"), "btn_nav_downloads")[0]["placement"] == "header"
+    plugin.handle_event("downloads", "action_download_0", "click", {"video_for_flashcards": "/media/matrix.mp4"})
+    assert plugin.associated_video_path == "/media/matrix.mp4"
+    # A subsequent search result must not change the downloaded file's language.
+    client.items[0].language = "ja"
+    plugin.handle_event("downloads", "btn_use_in_flashcards", "click", {"video_for_flashcards": "/media/matrix.mp4"})
+    handoff = [params for method, params in notifications if method == "vesta.openInFlashcards"][-1]
+    assert handoff["subtitleLanguage"] == "en"
+    assert handoff["subtitlePath"].endswith("-HI.srt")
+    plugin.handle_event("downloads", "btn_use_in_synchronize", "click", {"video_for_flashcards": ""})
+    assert notifications[-1] == ("vesta.openInSynchronize", {"subtitlePath": handoff["subtitlePath"], "videoPath": ""})
+    restored = SubtitlesPlugin(config_manager=ConfigManager(repo_root=tmp_path, data_dir=tmp_path / "data"))
+    restored.initialize(data_dir=str(tmp_path / "data"))
+    assert len(restored.download_history.items) == 1
+    selected = restored.handle_event("downloads", "action_download_0", "click", {})
+    assert selected["patch"]["values"]["video_for_flashcards"] == ""
+    assert restored.downloaded_subtitle_language == "en"
+    assert restored.downloaded_subtitle_path == handoff["subtitlePath"]
+
+
+def test_download_history_recovers_from_corrupt_storage_and_bounds_entries(tmp_path: Path):
+    from subtitles_plugin.downloads import DownloadHistory
+    history_file = tmp_path / "download-history.json"
+    history_file.write_text("invalid json")
+    history = DownloadHistory(tmp_path)
+    assert history.items == []
+    history.LIMIT = 2
+    for path in ["one.srt", "two.srt", "three.srt", "two.srt"]:
+        history.remember({"path": path, "language": "en", "title": path, "video": ""})
+    assert [entry["path"] for entry in history.items] == ["two.srt", "three.srt"]
+    assert len(DownloadHistory(tmp_path).items) == 2
+
+
+def test_download_navigation_preference_persists_and_keeps_search_results(tmp_path: Path):
+    data = tmp_path / "data"
+    manager = ConfigManager(repo_root=tmp_path, data_dir=data)
+    plugin = SubtitlesPlugin(config_manager=manager, opensubtitles_client=FakeOpenSubtitlesClient())
+    plugin.handle_event("search", "btn_do_search", "click", {"search_query": "Matrix"})
+    plugin.handle_event("settings", "btn_save_settings", "click", {
+        "cfg_api_key": "fake_key", "cfg_open_downloads_after_download": False,
+    })
+    assert ConfigManager(repo_root=tmp_path, data_dir=data).settings.open_downloads_after_download is False
+    result = plugin.handle_event("search", "btn_download_now", "click", {"download_dest_dir": str(tmp_path / "subs")})
+    assert result["screen"] == "search"
+    assert plugin.search_query == "Matrix"
+    assert len(plugin.search_results) == 1
+    assert len(plugin.download_history.items) == 1
+    assert find_node(result["root"], "btn_nav_downloads")[0] is not None
+
+
+def _download_for_removal(tmp_path: Path):
+    plugin = SubtitlesPlugin(config_manager=ConfigManager(repo_root=tmp_path, data_dir=tmp_path / "data"),
+                             opensubtitles_client=FakeOpenSubtitlesClient())
+    plugin.handle_event("search", "btn_do_search", "click", {"search_query": "Matrix"})
+    plugin.handle_event("search", "btn_download_now", "click", {"download_dest_dir": str(tmp_path / "subs")})
+    subtitle = Path(plugin.downloaded_subtitle_path)
+    video = tmp_path / "matrix.mp4"
+    video.write_bytes(b"video")
+    plugin._save_download_video({"video_for_flashcards": str(video)})
+    return plugin, subtitle, video
+
+
+def test_remove_download_requires_confirmation_and_preserves_files_by_default(tmp_path: Path):
+    plugin, subtitle, video = _download_for_removal(tmp_path)
+    response = plugin.handle_event("downloads", "action_remove_download_0", "click", {})
+    assert response["patch"]["values"]["remove_srt_file"] is False
+    assert subtitle.exists() and len(plugin.download_history.items) == 1
+    plugin.handle_event("downloads", "btn_cancel_remove_download", "click", {})
+    plugin.handle_event("downloads", "btn_confirm_remove_download", "click", {"remove_srt_file": True})
+    assert subtitle.exists() and len(plugin.download_history.items) == 1
+    plugin.handle_event("downloads", "action_remove_download_0", "click", {})
+    plugin.handle_event("downloads", "btn_confirm_remove_download", "click", {})
+    assert subtitle.exists() and video.exists()
+    assert plugin.download_history.items == []
+    assert plugin.downloaded_subtitle_path is None
+    assert SubtitlesPlugin(config_manager=plugin.config_manager).download_history.items == []
+
+
+def test_remove_download_can_delete_only_the_srt_and_keeps_video(tmp_path: Path):
+    plugin, subtitle, video = _download_for_removal(tmp_path)
+    plugin.handle_event("downloads", "action_remove_download_0", "click", {})
+    plugin.handle_event("downloads", "btn_confirm_remove_download", "click", {"remove_srt_file": True})
+    assert not subtitle.exists() and video.exists()
+    assert plugin.download_history.items == []
+
+
+def test_missing_download_can_be_removed_and_dry_run_preserves_entries(tmp_path: Path):
+    plugin, subtitle, video = _download_for_removal(tmp_path)
+    plugin.config_manager.update_settings({"dry_run_default": True}, save=False)
+    plugin.handle_event("downloads", "action_remove_download_0", "click", {})
+    plugin.handle_event("downloads", "btn_confirm_remove_download", "click", {"remove_srt_file": True})
+    assert subtitle.exists() and video.exists() and len(plugin.download_history.items) == 1
+    plugin.config_manager.update_settings({"dry_run_default": False}, save=False)
+    subtitle.unlink()
+    plugin.handle_event("downloads", "action_remove_download_0", "click", {})
+    plugin.handle_event("downloads", "btn_confirm_remove_download", "click", {"remove_srt_file": True})
+    assert plugin.download_history.items == [] and video.exists()
+
+
+def test_failed_file_deletion_preserves_download_history(tmp_path: Path):
+    plugin, subtitle, video = _download_for_removal(tmp_path)
+    plugin.handle_event("downloads", "action_remove_download_0", "click", {})
+    with patch.object(Path, "unlink", side_effect=PermissionError("read-only")):
+        plugin.handle_event("downloads", "btn_confirm_remove_download", "click", {"remove_srt_file": True})
+    assert len(plugin.download_history.items) == 1 and subtitle.exists() and video.exists()
+
+
+def test_plugin_version_matches_package_and_manifest():
+    import re
+    from subtitles_plugin import __version__
+    root = Path(__file__).resolve().parents[1]
+    assert __version__ == json.loads((root / "vesta-plugin.json").read_text())["version"]
+    assert __version__ == re.search(r'(?m)^version = "([^"]+)"', (root / "pyproject.toml").read_text()).group(1)
+
+
+def test_removal_targets_the_confirmed_path_after_history_reordering(tmp_path: Path):
+    plugin, subtitle, video = _download_for_removal(tmp_path)
+    plugin.handle_event("downloads", "action_remove_download_0", "click", {})
+    other = tmp_path / "other.srt"
+    other.write_text("Other subtitle")
+    plugin.download_history.remember({"path": str(other), "language": "it", "title": "Other", "video": ""})
+    plugin.handle_event("downloads", "btn_confirm_remove_download", "click", {"remove_srt_file": True})
+    assert not subtitle.exists() and other.exists() and video.exists()
+    assert [item["path"] for item in plugin.download_history.items] == [str(other)]
+
+
+def test_removal_request_keeps_clicked_entry_when_saving_video_reorders_history(tmp_path: Path):
+    plugin, subtitle, video = _download_for_removal(tmp_path)
+    other = tmp_path / "other.srt"
+    other.write_text("Other subtitle")
+    plugin.download_history.remember({"path": str(other), "language": "it", "title": "Other", "video": ""})
+    plugin.handle_event("downloads", "action_remove_download_0", "click", {"video_for_flashcards": ""})
+    plugin.handle_event("downloads", "btn_confirm_remove_download", "click", {"remove_srt_file": True})
+    assert subtitle.exists() and not other.exists() and video.exists()
+    assert [item["path"] for item in plugin.download_history.items] == [str(subtitle)]
